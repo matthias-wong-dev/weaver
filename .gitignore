@@ -1,0 +1,10 @@
+.DS_Store
+.venv/
+
+# APS Gazette downloaded source PDFs and generated extracts.
+data/gazette_vacancies/raw/
+data/gazette_vacancies/*.csv
+extracted/
+
+# Incomplete downloads.
+*.part
