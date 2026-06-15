@@ -62,6 +62,13 @@ class _Replacement:
     text: str
 
 
+@dataclass(frozen=True)
+class _QuerySpan:
+    start: int
+    end: int
+    select_index: int
+
+
 def insert_where_one_eq_zero(sql_text: str) -> str:
     """Insert ``WHERE 1=0`` into every SELECT in a T-SQL string.
 
@@ -84,12 +91,27 @@ def insert_where_one_eq_zero(sql_text: str) -> str:
 def insert_ctas(sql_text: str, table_name: str) -> str:
     """Prefix the last standalone SELECT query with Fabric CTAS syntax."""
 
-    query_span = _find_last_standalone_query_span(sql_text)
+    query_span = _find_last_standalone_query(sql_text)
     if query_span is None:
         return sql_text
 
-    start, _end = query_span
-    return f"{sql_text[:start]}CREATE TABLE {table_name} AS\n{sql_text[start:]}"
+    return (
+        f"{sql_text[:query_span.start]}CREATE TABLE {table_name} AS\n"
+        f"{sql_text[query_span.start:]}"
+    )
+
+
+def insert_select_into(sql_text: str, table_name: str) -> str:
+    """Insert ``INTO <table_name>`` into the last standalone SELECT query."""
+
+    query_span = _find_last_standalone_query(sql_text)
+    if query_span is None:
+        return sql_text
+
+    tokens = _flatten_with_offsets(sql_text)
+    insert_at = _find_select_into_insert_position(tokens, query_span)
+    insert_text = _select_into_text(sql_text, insert_at, table_name)
+    return f"{sql_text[:insert_at]}{insert_text}{sql_text[insert_at:]}"
 
 
 def _collect_replacements(sql_text: str) -> list[_Replacement]:
@@ -120,16 +142,16 @@ def _collect_replacements(sql_text: str) -> list[_Replacement]:
     return replacements
 
 
-def _find_last_standalone_query_span(sql_text: str) -> tuple[int, int] | None:
+def _find_last_standalone_query(sql_text: str) -> _QuerySpan | None:
     tokens = _flatten_with_offsets(sql_text)
-    spans: list[tuple[int, int, int]] = []
+    spans: list[_QuerySpan] = []
 
     for index, token in enumerate(tokens):
         if token.depth != 0:
             continue
 
         if _is_select(token) and _is_standalone_select_start(tokens, index):
-            spans.append((token.start, _find_query_end(tokens, index), token.start))
+            spans.append(_QuerySpan(token.start, _find_query_end(tokens, index), index))
             continue
 
         if _keyword_head(token) == "WITH" and _is_statement_boundary_before(
@@ -137,13 +159,52 @@ def _find_last_standalone_query_span(sql_text: str) -> tuple[int, int] | None:
         ):
             select_index = _find_cte_body_select(tokens, index)
             if select_index is not None:
-                spans.append((token.start, _find_query_end(tokens, select_index), token.start))
+                spans.append(
+                    _QuerySpan(
+                        token.start, _find_query_end(tokens, select_index), select_index
+                    )
+                )
 
     if not spans:
         return None
 
-    start, end, _position = max(spans, key=lambda item: item[2])
-    return start, end
+    return max(spans, key=lambda item: item.start)
+
+
+def _find_select_into_insert_position(
+    tokens: list[_FlatToken], query_span: _QuerySpan
+) -> int:
+    select_token = tokens[query_span.select_index]
+
+    for index in range(query_span.select_index + 1, len(tokens)):
+        token = tokens[index]
+        if token.start >= query_span.end:
+            break
+        if token.depth != select_token.depth:
+            continue
+        if _keyword_head(token) == "FROM":
+            return _end_before_trivia(tokens, query_span.select_index + 1, index)
+
+    end_index = _token_index_at_or_after(tokens, query_span.end)
+    return _end_before_trivia(tokens, query_span.select_index + 1, end_index)
+
+
+def _select_into_text(sql_text: str, insert_at: int, table_name: str) -> str:
+    if insert_at > 0 and sql_text[insert_at - 1] == "\n":
+        return f"INTO {table_name}\n"
+    next_non_space = insert_at
+    while next_non_space < len(sql_text) and sql_text[next_non_space] in " \t\r\n":
+        if sql_text[next_non_space] == "\n":
+            return f"\nINTO {table_name}"
+        next_non_space += 1
+    return f" INTO {table_name}"
+
+
+def _token_index_at_or_after(tokens: list[_FlatToken], position: int) -> int:
+    for index, token in enumerate(tokens):
+        if token.start >= position:
+            return index
+    return len(tokens)
 
 
 def _find_cte_body_select(tokens: list[_FlatToken], with_index: int) -> int | None:

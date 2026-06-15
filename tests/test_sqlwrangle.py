@@ -4,7 +4,11 @@ import pytest
 import sqlparse
 from sqlparse import tokens as T
 
-from source.sqlwrangle import insert_ctas, insert_where_one_eq_zero
+from source.sqlwrangle import (
+    insert_ctas,
+    insert_select_into,
+    insert_where_one_eq_zero,
+)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "sql"
@@ -59,10 +63,36 @@ def test_insert_ctas_wraps_one_query_in_serious_sql_fixtures(fixture_name):
     assert _select_count(transformed) == _select_count(sql)
 
 
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "customer_retention_cohort.sql",
+        "inventory_replenishment_forecast.sql",
+        "order_fulfillment_pipeline.sql",
+        "revenue_reconciliation_month_end.sql",
+        "security_access_audit.sql",
+    ],
+)
+def test_insert_select_into_wraps_one_query_in_serious_sql_fixtures(fixture_name):
+    sql = _fixture_sql(fixture_name)
+    transformed = insert_select_into(sql, "dbo.select_into_result")
+
+    assert transformed.count("INTO dbo.select_into_result") == 1
+    assert transformed.count("CREATE TABLE dbo.select_into_result AS") == 0
+    assert _select_count(transformed) == _select_count(sql)
+
+
 def test_insert_ctas_prefixes_simple_select():
     assert (
         insert_ctas("SELECT * FROM dbo.Users", "dbo.UsersCopy")
         == "CREATE TABLE dbo.UsersCopy AS\nSELECT * FROM dbo.Users"
+    )
+
+
+def test_insert_select_into_modifies_simple_select():
+    assert (
+        insert_select_into("SELECT * FROM dbo.Users", "dbo.UsersCopy")
+        == "SELECT * INTO dbo.UsersCopy FROM dbo.Users"
     )
 
 
@@ -85,6 +115,30 @@ DECLARE @x int = 1;
 
 CREATE TABLE dbo.LastResult AS
 SELECT *
+FROM dbo.Teams
+"""
+    )
+
+
+def test_insert_select_into_modifies_only_last_standalone_select():
+    sql = """SELECT *
+FROM dbo.Users;
+
+DECLARE @x int = 1;
+
+SELECT *
+FROM dbo.Teams
+"""
+
+    assert (
+        insert_select_into(sql, "dbo.LastResult")
+        == """SELECT *
+FROM dbo.Users;
+
+DECLARE @x int = 1;
+
+SELECT *
+INTO dbo.LastResult
 FROM dbo.Teams
 """
     )
@@ -124,6 +178,40 @@ FROM recent_users AS ru
     )
 
 
+def test_insert_select_into_modifies_outer_cte_select():
+    sql = """DECLARE @cutoff date = '2026-01-01';
+
+WITH recent_users AS (
+    SELECT
+        u.Id
+    FROM dbo.Users AS u
+    WHERE
+        u.CreatedAt >= @cutoff
+)
+SELECT
+    ru.Id
+FROM recent_users AS ru
+"""
+
+    assert (
+        insert_select_into(sql, "dbo.RecentUsers")
+        == """DECLARE @cutoff date = '2026-01-01';
+
+WITH recent_users AS (
+    SELECT
+        u.Id
+    FROM dbo.Users AS u
+    WHERE
+        u.CreatedAt >= @cutoff
+)
+SELECT
+    ru.Id
+INTO dbo.RecentUsers
+FROM recent_users AS ru
+"""
+    )
+
+
 def test_insert_ctas_wraps_entire_union_query():
     sql = """SELECT
     Id
@@ -139,6 +227,30 @@ FROM dbo.ArchivedUsers
         == """CREATE TABLE dbo.AllUsers AS
 SELECT
     Id
+FROM dbo.Users
+UNION ALL
+SELECT
+    Id
+FROM dbo.ArchivedUsers
+"""
+    )
+
+
+def test_insert_select_into_modifies_first_branch_of_union_query():
+    sql = """SELECT
+    Id
+FROM dbo.Users
+UNION ALL
+SELECT
+    Id
+FROM dbo.ArchivedUsers
+"""
+
+    assert (
+        insert_select_into(sql, "dbo.AllUsers")
+        == """SELECT
+    Id
+INTO dbo.AllUsers
 FROM dbo.Users
 UNION ALL
 SELECT
@@ -174,6 +286,32 @@ FROM dbo.Teams AS t
     )
 
 
+def test_insert_select_into_ignores_insert_select_and_uses_last_result_select():
+    sql = """INSERT INTO #UserIds (Id)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+
+SELECT
+    t.Id
+FROM dbo.Teams AS t
+"""
+
+    assert (
+        insert_select_into(sql, "dbo.TeamResult")
+        == """INSERT INTO #UserIds (Id)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+
+SELECT
+    t.Id
+INTO dbo.TeamResult
+FROM dbo.Teams AS t
+"""
+    )
+
+
 def test_insert_ctas_handles_declarations_before_final_select_without_semicolon():
     sql = """DECLARE @cutoff date = '2026-01-01'
 SET @cutoff = DATEADD(day, -7, @cutoff)
@@ -195,6 +333,54 @@ FROM dbo.Users AS u
 WHERE
     u.CreatedAt >= @cutoff
 """
+    )
+
+
+def test_insert_select_into_handles_declarations_before_final_select_without_semicolon():
+    sql = """DECLARE @cutoff date = '2026-01-01'
+SET @cutoff = DATEADD(day, -7, @cutoff)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+WHERE
+    u.CreatedAt >= @cutoff
+"""
+
+    assert (
+        insert_select_into(sql, "dbo.RecentUsers")
+        == """DECLARE @cutoff date = '2026-01-01'
+SET @cutoff = DATEADD(day, -7, @cutoff)
+SELECT
+    u.Id
+INTO dbo.RecentUsers
+FROM dbo.Users AS u
+WHERE
+    u.CreatedAt >= @cutoff
+"""
+    )
+
+
+def test_insert_select_into_handles_select_without_from():
+    assert (
+        insert_select_into("SELECT 1 AS One", "dbo.OneRow")
+        == "SELECT 1 AS One INTO dbo.OneRow"
+    )
+
+
+def test_mixed_case_keywords_work_across_transformers():
+    sql = "sEleCt u.Id FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
+
+    assert (
+        insert_where_one_eq_zero(sql)
+        == "sEleCt u.Id FrOm dbo.Users as u wHeRe (u.IsActive = 1) AND 1=0 oRdEr bY u.Id"
+    )
+    assert (
+        insert_ctas(sql, "dbo.MixedCase")
+        == "CREATE TABLE dbo.MixedCase AS\nsEleCt u.Id FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
+    )
+    assert (
+        insert_select_into(sql, "dbo.MixedCase")
+        == "sEleCt u.Id INTO dbo.MixedCase FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
     )
 
 

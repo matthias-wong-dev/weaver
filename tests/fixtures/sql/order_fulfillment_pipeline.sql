@@ -1,63 +1,63 @@
 -- Order fulfillment pipeline extract.
 -- Deliberately mixes temp tables, semicolon-free statements, and GO.
-DECLARE @WarehouseId int = 42
-DECLARE @RunId uniqueidentifier = NEWID()
+dEcLaRe @WarehouseId int = 42
+declare @RunId uniqueidentifier = NEWID()
 
-SELECT
+sEleCt
     o.OrderId,
     o.CustomerId,
     o.WarehouseId,
     o.PromiseDate,
     o.PriorityCode
-INTO #OpenOrders
-FROM sales.Orders AS o
-WHERE
+into #OpenOrders
+from sales.Orders as o
+where
     o.WarehouseId = @WarehouseId
-    AND o.FulfillmentStatus IN ('ALLOCATED', 'PICKING', 'PACKED')
-    AND o.CancelledAt IS NULL
+    and o.FulfillmentStatus in ('ALLOCATED', 'PICKING', 'PACKED')
+    and o.CancelledAt is null
 
-CREATE INDEX IX_OpenOrders_OrderId ON #OpenOrders (OrderId)
+create index IX_OpenOrders_OrderId on #OpenOrders (OrderId)
 
-GO
+gO
 
-IF EXISTS (
-    SELECT
+if exists (
+    select
         1
-    FROM #OpenOrders AS oo
-    WHERE
+    from #OpenOrders as oo
+    where
         oo.PriorityCode = 'EXPRESS'
 )
-BEGIN
-    PRINT 'Express orders detected for run';
-END
+begin
+    print 'Express orders detected for run';
+end
 
-INSERT INTO audit.FulfillmentRunLog (
+insert into audit.FulfillmentRunLog (
     RunId,
     WarehouseId,
     OpenOrderCount,
     CreatedAt
 )
-SELECT
+select
     @RunId,
     @WarehouseId,
     COUNT_BIG(*),
     SYSUTCDATETIME()
-FROM #OpenOrders AS oo;
+from #OpenOrders as oo;
 
-SELECT
+SeLeCt
     oo.OrderId,
     li.LineId,
     li.Sku,
     li.Quantity,
     inv.AvailableQuantity
-FROM #OpenOrders AS oo
-INNER JOIN sales.OrderLines AS li
-    ON li.OrderId = oo.OrderId
-LEFT JOIN warehouse.Inventory AS inv
-    ON inv.Sku = li.Sku
-    AND inv.WarehouseId = oo.WarehouseId
-WHERE
+from #OpenOrders as oo
+inner join sales.OrderLines as li
+    on li.OrderId = oo.OrderId
+left join warehouse.Inventory as inv
+    on inv.Sku = li.Sku
+    and inv.WarehouseId = oo.WarehouseId
+where
     COALESCE(inv.AvailableQuantity, 0) < li.Quantity
-ORDER BY
+order by
     oo.PromiseDate,
-    oo.PriorityCode DESC;
+    oo.PriorityCode desc;
