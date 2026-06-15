@@ -39,6 +39,7 @@ SET LastCheckedAt = SYSUTCDATETIME()
 WHERE PeriodStart = @PeriodStart;
 
 SELECT
+    'ACCOUNT' AS RowType,
     l.AccountCode,
     SUM(CASE WHEN l.SourceSystem = 'Billing' THEN l.Amount ELSE 0 END) AS BillingAmount,
     SUM(CASE WHEN l.SourceSystem = 'Payments' THEN l.Amount ELSE 0 END) AS PaymentAmount,
@@ -48,5 +49,14 @@ GROUP BY
     l.AccountCode
 HAVING
     ABS(SUM(l.Amount)) > 0.01
+UNION ALL
+SELECT
+    'TOTAL' AS RowType,
+    NULL AS AccountCode,
+    SUM(CASE WHEN l.SourceSystem = 'Billing' THEN l.Amount ELSE 0 END) AS BillingAmount,
+    SUM(CASE WHEN l.SourceSystem = 'Payments' THEN l.Amount ELSE 0 END) AS PaymentAmount,
+    SUM(l.Amount) AS Difference
+FROM @Ledger AS l
 ORDER BY
-    ABS(SUM(l.Amount)) DESC;
+    RowType,
+    ABS(Difference) DESC

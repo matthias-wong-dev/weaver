@@ -4,7 +4,7 @@ import pytest
 import sqlparse
 from sqlparse import tokens as T
 
-from source.sqlwrangle import insert_where_one_eq_zero
+from source.sqlwrangle import insert_ctas, insert_where_one_eq_zero
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "sql"
@@ -39,6 +39,163 @@ def test_insert_where_one_eq_zero_guards_every_select_in_serious_sql_fixtures(fi
 
     assert transformed.count("1=0") == _select_count(sql)
     assert "SELECT * FROM dbo.Nope" not in transformed
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "customer_retention_cohort.sql",
+        "inventory_replenishment_forecast.sql",
+        "order_fulfillment_pipeline.sql",
+        "revenue_reconciliation_month_end.sql",
+        "security_access_audit.sql",
+    ],
+)
+def test_insert_ctas_wraps_one_query_in_serious_sql_fixtures(fixture_name):
+    sql = _fixture_sql(fixture_name)
+    transformed = insert_ctas(sql, "dbo.ctas_result")
+
+    assert transformed.count("CREATE TABLE dbo.ctas_result AS") == 1
+    assert _select_count(transformed) == _select_count(sql)
+
+
+def test_insert_ctas_prefixes_simple_select():
+    assert (
+        insert_ctas("SELECT * FROM dbo.Users", "dbo.UsersCopy")
+        == "CREATE TABLE dbo.UsersCopy AS\nSELECT * FROM dbo.Users"
+    )
+
+
+def test_insert_ctas_prefixes_only_last_standalone_select():
+    sql = """SELECT *
+FROM dbo.Users;
+
+DECLARE @x int = 1;
+
+SELECT *
+FROM dbo.Teams
+"""
+
+    assert (
+        insert_ctas(sql, "dbo.LastResult")
+        == """SELECT *
+FROM dbo.Users;
+
+DECLARE @x int = 1;
+
+CREATE TABLE dbo.LastResult AS
+SELECT *
+FROM dbo.Teams
+"""
+    )
+
+
+def test_insert_ctas_prefixes_cte_before_with():
+    sql = """DECLARE @cutoff date = '2026-01-01';
+
+WITH recent_users AS (
+    SELECT
+        u.Id
+    FROM dbo.Users AS u
+    WHERE
+        u.CreatedAt >= @cutoff
+)
+SELECT
+    ru.Id
+FROM recent_users AS ru
+"""
+
+    assert (
+        insert_ctas(sql, "dbo.RecentUsers")
+        == """DECLARE @cutoff date = '2026-01-01';
+
+CREATE TABLE dbo.RecentUsers AS
+WITH recent_users AS (
+    SELECT
+        u.Id
+    FROM dbo.Users AS u
+    WHERE
+        u.CreatedAt >= @cutoff
+)
+SELECT
+    ru.Id
+FROM recent_users AS ru
+"""
+    )
+
+
+def test_insert_ctas_wraps_entire_union_query():
+    sql = """SELECT
+    Id
+FROM dbo.Users
+UNION ALL
+SELECT
+    Id
+FROM dbo.ArchivedUsers
+"""
+
+    assert (
+        insert_ctas(sql, "dbo.AllUsers")
+        == """CREATE TABLE dbo.AllUsers AS
+SELECT
+    Id
+FROM dbo.Users
+UNION ALL
+SELECT
+    Id
+FROM dbo.ArchivedUsers
+"""
+    )
+
+
+def test_insert_ctas_ignores_insert_select_and_uses_last_result_select():
+    sql = """INSERT INTO #UserIds (Id)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+
+SELECT
+    t.Id
+FROM dbo.Teams AS t
+"""
+
+    assert (
+        insert_ctas(sql, "dbo.TeamResult")
+        == """INSERT INTO #UserIds (Id)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+
+CREATE TABLE dbo.TeamResult AS
+SELECT
+    t.Id
+FROM dbo.Teams AS t
+"""
+    )
+
+
+def test_insert_ctas_handles_declarations_before_final_select_without_semicolon():
+    sql = """DECLARE @cutoff date = '2026-01-01'
+SET @cutoff = DATEADD(day, -7, @cutoff)
+SELECT
+    u.Id
+FROM dbo.Users AS u
+WHERE
+    u.CreatedAt >= @cutoff
+"""
+
+    assert (
+        insert_ctas(sql, "dbo.RecentUsers")
+        == """DECLARE @cutoff date = '2026-01-01'
+SET @cutoff = DATEADD(day, -7, @cutoff)
+CREATE TABLE dbo.RecentUsers AS
+SELECT
+    u.Id
+FROM dbo.Users AS u
+WHERE
+    u.CreatedAt >= @cutoff
+"""
+    )
 
 
 def test_adds_where_to_simple_select():
