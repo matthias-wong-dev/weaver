@@ -5,6 +5,7 @@ import pytest
 from source.ddlhelper import (
     build_create_table_sql_from_describe_rows,
     generate_infer_create_table_sql,
+    generate_load_stored_procedure_sql,
     wrap_create_or_alter_view,
 )
 
@@ -14,6 +15,18 @@ FABRIC_SAMPLE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "fabric_sample_
 
 def _fabric_sample_fixture_sql(name):
     return (FABRIC_SAMPLE_FIXTURE_DIR / name).read_text()
+
+
+def _materialise_installed_procedure(installer_sql, replacements):
+    marker = "SET @weaver_proc_sql = N'"
+    start = installer_sql.index(marker) + len(marker)
+    end = installer_sql.index("';\nSET @weaver_proc_sql = REPLACE", start)
+    procedure_sql = installer_sql[start:end].replace("''", "'")
+
+    for placeholder, value in replacements.items():
+        procedure_sql = procedure_sql.replace(placeholder, value)
+
+    return procedure_sql
 
 
 @pytest.mark.parametrize(
@@ -45,7 +58,7 @@ def test_generate_infer_create_table_sql_uses_sample_query_fixtures(fixture_name
     assert "OBJECT_ID(N'tempdb..#weaver_shape_test')" in transformed
     assert "sys.dm_exec_describe_first_result_set" not in transformed
     assert "QUOTENAME(@weaver_identity_column) + N' bigint IDENTITY NOT NULL'" in transformed
-    assert "N'[Row delete datetime] datetime2(7) NOT NULL DEFAULT ''9999-12-31 00:00:00''" in transformed
+    assert "N'[Row delete datetime] datetime2(6) NOT NULL'" in transformed
     assert "(1, N'GeneratedSK')" in transformed
     assert "+ N'PRIMARY KEY NONCLUSTERED ('" in transformed
     assert "+ N') NOT ENFORCED;'" in transformed
@@ -156,18 +169,18 @@ def test_build_create_table_sql_from_describe_rows_maps_fabric_types():
         "    [Name] varchar(128) NULL,\n"
         "    [Amount] decimal(19,4) NOT NULL,\n"
         "    [Column3] smallint NULL,\n"
-        "    [Row insert datetime] datetime2(7) NULL,\n"
-        "    [Row update datetime] datetime2(7) NULL,\n"
-        "    [Row delete datetime] datetime2(7) NOT NULL DEFAULT '9999-12-31 00:00:00'\n"
+        "    [Row insert datetime] datetime2(6) NULL,\n"
+        "    [Row update datetime] datetime2(6) NULL,\n"
+        "    [Row delete datetime] datetime2(6) NOT NULL\n"
         ");\n\n"
         "CREATE TABLE [dbo].[Inferred_History] (\n"
         "    [InferredSK] bigint NOT NULL,\n"
         "    [Name] varchar(128) NULL,\n"
         "    [Amount] decimal(19,4) NOT NULL,\n"
         "    [Column3] smallint NULL,\n"
-        "    [Row insert datetime] datetime2(7) NULL,\n"
-        "    [Row update datetime] datetime2(7) NULL,\n"
-        "    [Row delete datetime] datetime2(7) NOT NULL\n"
+        "    [Row insert datetime] datetime2(6) NULL,\n"
+        "    [Row update datetime] datetime2(6) NULL,\n"
+        "    [Row delete datetime] datetime2(6) NOT NULL\n"
         ");\n\n"
         "ALTER TABLE [dbo].[Inferred_Current] ADD CONSTRAINT [PK_Inferred_Current] "
         "PRIMARY KEY NONCLUSTERED ([InferredSK]) NOT ENFORCED;\n\n"
@@ -274,6 +287,221 @@ def test_build_create_table_sql_from_describe_rows_requires_schema_table_name():
 
     with pytest.raises(ValueError, match="schema.table"):
         build_create_table_sql_from_describe_rows(rows, "NoSchema")
+
+
+def test_generate_load_stored_procedure_sql_builds_pk_incremental_loader():
+    installer_sql = generate_load_stored_procedure_sql(
+        "SELECT CustomerCode, CustomerName, Balance FROM dbo.SourceCustomers",
+        "mart.Customer",
+        primary_key_columns=["CustomerCode"],
+    )
+    installer_prefix = installer_sql.split("SET @weaver_proc_sql", maxsplit=1)[0]
+
+    assert installer_sql.startswith("/* Weaver generated ETL procedure installer. */")
+    assert "OBJECT_ID(N'[mart].[Customer_Current]')" in installer_prefix
+    assert "CREATE TABLE [mart].[Customer_Staging] AS" not in installer_prefix
+    assert "SET @weaver_proc_sql = N'CREATE OR ALTER PROCEDURE [_].[ETL mart.Customer]" in installer_sql
+    assert "CREATE TABLE [mart].[Customer_Staging] AS" in installer_sql
+    assert "CREATE TABLE [mart].[Customer_Upsert] AS" in installer_sql
+    assert "LEFT JOIN [mart].[Customer] AS t\n        ON s.[CustomerCode] = t.[CustomerCode]" in installer_sql
+    assert "OR EXISTS (" in installer_sql
+    assert "EXCEPT" in installer_sql
+    assert "AS [_Is new row]" in installer_sql
+    assert "INSERT INTO [mart].[Customer_Current]" in installer_sql
+    assert "INSERT INTO [mart].[Customer_History]" in installer_sql
+    assert "UPDATE c" in installer_sql
+    assert "DELETE c" in installer_sql
+    assert "WHERE u.[_Is new row] = 1" in installer_sql
+    assert "WHERE u.[_Is new row] = 0" in installer_sql
+    assert "c.[Row update datetime] = @weaver_load_datetime" in installer_sql
+    assert "WHEN c.name = N'Row delete datetime' THEN N'@weaver_load_datetime AS ' + QUOTENAME(c.name)" in installer_sql
+    assert "DELETE h" in installer_sql
+    assert "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__SOURCE_COLUMNS__', @weaver_source_columns);" in installer_sql
+
+    assert _materialise_installed_procedure(
+        installer_sql,
+        {
+            "__SOURCE_COLUMNS__": "[CustomerCode], [CustomerName], [Balance]",
+            "__STAGING_SELECT_COLUMNS__": "s.[CustomerCode], s.[CustomerName], s.[Balance]",
+            "__UPSERT_SELECT_COLUMNS__": "u.[CustomerCode], u.[CustomerName], u.[Balance]",
+            "__TARGET_SELECT_COLUMNS__": "t.[CustomerCode], t.[CustomerName], t.[Balance]",
+            "__HISTORY_COLUMNS__": "[CustomerCode], [CustomerName], [Balance], [Row insert datetime], [Row update datetime], [Row delete datetime]",
+            "__HISTORY_SELECT_COLUMNS__": "c.[CustomerCode], c.[CustomerName], c.[Balance], c.[Row insert datetime], c.[Row update datetime], @weaver_load_datetime AS [Row delete datetime]",
+            "__UPDATE_SET_COLUMNS__": "c.[CustomerName] = u.[CustomerName], c.[Balance] = u.[Balance], c.[Row update datetime] = @weaver_load_datetime, c.[Row delete datetime] = CONVERT(datetime2(6), '9999-12-31 00:00:00')",
+        },
+    ) == """CREATE OR ALTER PROCEDURE [_].[ETL mart.Customer]
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @weaver_load_datetime datetime2(6) = SYSUTCDATETIME();
+
+    IF OBJECT_ID(N'[mart].[Customer_Upsert]', N'U') IS NOT NULL DROP TABLE [mart].[Customer_Upsert];
+    IF OBJECT_ID(N'[mart].[Customer_Staging]', N'U') IS NOT NULL DROP TABLE [mart].[Customer_Staging];
+
+    CREATE TABLE [mart].[Customer_Staging] AS
+    SELECT CustomerCode, CustomerName, Balance FROM dbo.SourceCustomers;
+
+    CREATE TABLE [mart].[Customer_Upsert] AS
+    SELECT
+        s.[CustomerCode], s.[CustomerName], s.[Balance],
+        CASE WHEN t.[CustomerCode] IS NULL THEN CAST(1 AS int) ELSE CAST(0 AS int) END AS [_Is new row]
+    FROM [mart].[Customer_Staging] AS s
+    LEFT JOIN [mart].[Customer] AS t
+        ON s.[CustomerCode] = t.[CustomerCode]
+    WHERE t.[CustomerCode] IS NULL
+        OR EXISTS (
+            SELECT
+                s.[CustomerCode], s.[CustomerName], s.[Balance]
+            EXCEPT
+            SELECT
+                t.[CustomerCode], t.[CustomerName], t.[Balance]
+        );
+
+    INSERT INTO [mart].[Customer_Current] (
+        [CustomerCode], [CustomerName], [Balance],
+        [Row insert datetime],
+        [Row update datetime],
+        [Row delete datetime]
+    )
+    SELECT
+        u.[CustomerCode], u.[CustomerName], u.[Balance],
+        @weaver_load_datetime,
+        @weaver_load_datetime,
+        CONVERT(datetime2(6), '9999-12-31 00:00:00')
+    FROM [mart].[Customer_Upsert] AS u
+    WHERE u.[_Is new row] = 1;
+
+    BEGIN TRY
+        INSERT INTO [mart].[Customer_History] (
+            [CustomerCode], [CustomerName], [Balance], [Row insert datetime], [Row update datetime], [Row delete datetime]
+        )
+        SELECT
+            c.[CustomerCode], c.[CustomerName], c.[Balance], c.[Row insert datetime], c.[Row update datetime], @weaver_load_datetime AS [Row delete datetime]
+        FROM [mart].[Customer_Current] AS c
+        INNER JOIN [mart].[Customer_Upsert] AS u
+            ON c.[CustomerCode] = u.[CustomerCode]
+        WHERE u.[_Is new row] = 0;
+
+        UPDATE c
+        SET c.[CustomerName] = u.[CustomerName], c.[Balance] = u.[Balance], c.[Row update datetime] = @weaver_load_datetime, c.[Row delete datetime] = CONVERT(datetime2(6), '9999-12-31 00:00:00')
+        FROM [mart].[Customer_Current] AS c
+        INNER JOIN [mart].[Customer_Upsert] AS u
+            ON c.[CustomerCode] = u.[CustomerCode]
+        WHERE u.[_Is new row] = 0;
+    END TRY
+    BEGIN CATCH
+        DELETE h
+        FROM [mart].[Customer_History] AS h
+        INNER JOIN [mart].[Customer_Upsert] AS u
+            ON h.[CustomerCode] = u.[CustomerCode]
+        WHERE u.[_Is new row] = 0
+            AND h.[Row delete datetime] = @weaver_load_datetime;
+
+        THROW;
+    END CATCH;
+
+    BEGIN TRY
+        INSERT INTO [mart].[Customer_History] (
+            [CustomerCode], [CustomerName], [Balance], [Row insert datetime], [Row update datetime], [Row delete datetime]
+        )
+        SELECT
+            c.[CustomerCode], c.[CustomerName], c.[Balance], c.[Row insert datetime], c.[Row update datetime], @weaver_load_datetime AS [Row delete datetime]
+        FROM [mart].[Customer_Current] AS c
+        WHERE NOT EXISTS (SELECT 1 FROM [mart].[Customer_Staging] AS s WHERE s.[CustomerCode] = c.[CustomerCode]);
+
+        DELETE c
+        FROM [mart].[Customer_Current] AS c
+        WHERE NOT EXISTS (SELECT 1 FROM [mart].[Customer_Staging] AS s WHERE s.[CustomerCode] = c.[CustomerCode]);
+    END TRY
+    BEGIN CATCH
+        DELETE h
+        FROM [mart].[Customer_History] AS h
+        WHERE h.[Row delete datetime] = @weaver_load_datetime
+            AND NOT EXISTS (SELECT 1 FROM [mart].[Customer_Staging] AS s WHERE s.[CustomerCode] = h.[CustomerCode]);
+
+        THROW;
+    END CATCH;
+
+    IF OBJECT_ID(N'[mart].[Customer_Upsert]', N'U') IS NOT NULL DROP TABLE [mart].[Customer_Upsert];
+    IF OBJECT_ID(N'[mart].[Customer_Staging]', N'U') IS NOT NULL DROP TABLE [mart].[Customer_Staging];
+END;"""
+
+
+def test_generate_load_stored_procedure_sql_builds_full_refresh_without_pk():
+    installer_sql = generate_load_stored_procedure_sql(
+        "SELECT ProductCode, ProductName FROM dbo.SourceProducts;",
+        "mart.Product",
+    )
+
+    assert "SET @weaver_proc_sql = N'CREATE OR ALTER PROCEDURE [_].[ETL mart.Product]" in installer_sql
+    assert "OBJECT_ID(N'[mart].[Product_Current]')" in installer_sql
+    assert "CREATE TABLE [mart].[Product_Staging] AS" in installer_sql
+    assert "CREATE TABLE [mart].[Product_Upsert] AS" not in installer_sql
+    assert "DELETE FROM [mart].[Product_Current];" in installer_sql
+    assert "INSERT INTO [mart].[Product_Current]" in installer_sql
+    assert "INSERT INTO [mart].[Product_History]" not in installer_sql
+    assert "[Row insert datetime]," in installer_sql
+    assert "[Row update datetime]," in installer_sql
+    assert "[Row delete datetime]" in installer_sql
+
+    assert _materialise_installed_procedure(
+        installer_sql,
+        {
+            "__SOURCE_COLUMNS__": "[ProductCode], [ProductName]",
+            "__STAGING_SELECT_COLUMNS__": "s.[ProductCode], s.[ProductName]",
+            "__UPSERT_SELECT_COLUMNS__": "",
+            "__TARGET_SELECT_COLUMNS__": "",
+            "__HISTORY_COLUMNS__": "[ProductCode], [ProductName], [Row insert datetime], [Row update datetime], [Row delete datetime]",
+            "__HISTORY_SELECT_COLUMNS__": "",
+            "__UPDATE_SET_COLUMNS__": "",
+        },
+    ) == """CREATE OR ALTER PROCEDURE [_].[ETL mart.Product]
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @weaver_load_datetime datetime2(6) = SYSUTCDATETIME();
+
+    IF OBJECT_ID(N'[mart].[Product_Upsert]', N'U') IS NOT NULL DROP TABLE [mart].[Product_Upsert];
+    IF OBJECT_ID(N'[mart].[Product_Staging]', N'U') IS NOT NULL DROP TABLE [mart].[Product_Staging];
+
+    CREATE TABLE [mart].[Product_Staging] AS
+    SELECT ProductCode, ProductName FROM dbo.SourceProducts;
+
+    DELETE FROM [mart].[Product_Current];
+
+    INSERT INTO [mart].[Product_Current] (
+        [ProductCode], [ProductName],
+        [Row insert datetime],
+        [Row update datetime],
+        [Row delete datetime]
+    )
+    SELECT
+        s.[ProductCode], s.[ProductName],
+        @weaver_load_datetime,
+        @weaver_load_datetime,
+        CONVERT(datetime2(6), '9999-12-31 00:00:00')
+    FROM [mart].[Product_Staging] AS s;
+
+    IF OBJECT_ID(N'[mart].[Product_Upsert]', N'U') IS NOT NULL DROP TABLE [mart].[Product_Upsert];
+    IF OBJECT_ID(N'[mart].[Product_Staging]', N'U') IS NOT NULL DROP TABLE [mart].[Product_Staging];
+END;"""
+
+
+def test_generate_load_stored_procedure_sql_quotes_names_and_composite_pk():
+    installer_sql = generate_load_stored_procedure_sql(
+        "SELECT [Order Id], [Line No], Amount FROM dbo.SourceOrderLines",
+        "audit.[Order Line]",
+        primary_key_columns=["Order Id", "Line No"],
+    )
+
+    assert "CREATE OR ALTER PROCEDURE [_].[ETL audit.Order Line]" in installer_sql
+    assert "CREATE TABLE [audit].[Order Line_Staging] AS" in installer_sql
+    assert (
+        "LEFT JOIN [audit].[Order Line] AS t\n        ON "
+        "s.[Order Id] = t.[Order Id] AND s.[Line No] = t.[Line No]"
+    ) in installer_sql
+    assert "N'order id'" in installer_sql
+    assert "N'line no'" in installer_sql
 
 
 def test_wrap_create_or_alter_view_for_plain_select():
