@@ -1,2 +1,5 @@
 sqlparse
 pytest
+PyYAML
+pyodbc
+azure-identity
