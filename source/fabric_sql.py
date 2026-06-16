@@ -111,14 +111,15 @@ def generate_create_table_sql(
     target_table_name: str,
     *,
     identity_column: str | None = None,
+    primary_key_columns: list[str] | None = None,
     server: str | None = None,
     database: str | None = None,
     timeout: int = 30,
     type_mapping_path=None,
 ) -> str:
-    """Describe SQL in Fabric and return pure CREATE TABLE SQL."""
+    """Describe SQL in Fabric and return backing table/view DDL."""
 
-    from source.sqlwrangle import build_create_table_sql_from_describe_rows
+    from source.ddlhelper import build_create_table_sql_from_describe_rows
 
     rows = describe_first_result_set(
         sql,
@@ -130,5 +131,6 @@ def generate_create_table_sql(
         rows,
         target_table_name,
         identity_column=identity_column,
+        primary_key_columns=primary_key_columns,
         type_mapping_path=type_mapping_path,
     )
