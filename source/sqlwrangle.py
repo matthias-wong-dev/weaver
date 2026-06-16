@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from string import Template
 
 import sqlparse
@@ -11,6 +12,7 @@ from sqlparse import tokens as T
 
 
 SQL_TEMPLATE_DIR = Path(__file__).resolve().parent / "sql_templates"
+SqlDependency = tuple[str, ...]
 
 
 _BOUNDARY_KEYWORDS = {
@@ -47,6 +49,19 @@ _STATEMENT_START_KEYWORDS = {
     "USE",
     "WAITFOR",
     "WHILE",
+}
+
+_FROM_DEPENDENCY_BOUNDARY_KEYWORDS = {
+    "FOR",
+    "GO",
+    "GROUP",
+    "HAVING",
+    "OPTION",
+    "ORDER",
+    "UNION",
+    "EXCEPT",
+    "INTERSECT",
+    "WHERE",
 }
 
 
@@ -131,6 +146,230 @@ def render_sql_template(template_name: str, **values: object) -> str:
 
     template = Template(get_sql_template(template_name))
     return template.substitute({key: str(value) for key, value in values.items()})
+
+
+def find_sql_dependencies(sql_text: str) -> frozenset[SqlDependency]:
+    """Find two-part SES and three-part external object references in SQL.
+
+    Dependencies are collected from relation positions such as ``from`` and
+    ``join``. Each dependency is returned as a tuple of identifier parts with
+    bracket or quote delimiters removed.
+    """
+
+    tokens = _flatten_with_offsets(sql_text)
+    dependencies: set[SqlDependency] = set()
+
+    for index, token in enumerate(tokens):
+        if not _is_dependency_context(token):
+            continue
+
+        if _keyword_head(token) == "FROM":
+            _add_from_dependencies(sql_text, tokens, index, dependencies)
+            continue
+
+        _add_next_dependency(sql_text, tokens, index, dependencies)
+
+    return frozenset(dependencies)
+
+
+def extract_sql_dependencies(sql_text: str) -> frozenset[SqlDependency]:
+    """Alias for ``find_sql_dependencies``."""
+
+    return find_sql_dependencies(sql_text)
+
+
+def format_sql_dependency(dependency: SqlDependency) -> str:
+    """Format a dependency tuple as a bracketed multipart SQL name."""
+
+    return ".".join(_quote_dependency_part(part) for part in dependency)
+
+
+def _is_dependency_context(token: _FlatToken) -> bool:
+    keyword = _keyword_head(token)
+    words = set(token.normalized.split())
+    return (
+        keyword in {"FROM", "APPLY", "USING", "EXEC", "EXECUTE"}
+        or "JOIN" in words
+    )
+
+
+def _add_from_dependencies(
+    sql_text: str,
+    tokens: list[_FlatToken],
+    from_index: int,
+    dependencies: set[SqlDependency],
+) -> None:
+    from_depth = tokens[from_index].depth
+    first_source = _next_significant_index(tokens, from_index + 1)
+    if first_source is None:
+        return
+
+    _add_dependency_at_token(sql_text, tokens[first_source], dependencies)
+
+    for index in range(first_source + 1, len(tokens)):
+        token = tokens[index]
+        if token.depth < from_depth:
+            return
+        if token.depth != from_depth:
+            continue
+        if _is_from_dependency_boundary(token):
+            return
+        if token.value != ",":
+            continue
+
+        next_source = _next_significant_index(tokens, index + 1)
+        if next_source is None:
+            return
+        if tokens[next_source].depth != from_depth:
+            continue
+        _add_dependency_at_token(sql_text, tokens[next_source], dependencies)
+
+
+def _add_next_dependency(
+    sql_text: str,
+    tokens: list[_FlatToken],
+    context_index: int,
+    dependencies: set[SqlDependency],
+) -> None:
+    next_index = _next_significant_index(tokens, context_index + 1)
+    if next_index is None:
+        return
+    _add_dependency_at_token(sql_text, tokens[next_index], dependencies)
+
+
+def _add_dependency_at_token(
+    sql_text: str,
+    token: _FlatToken,
+    dependencies: set[SqlDependency],
+) -> None:
+    parsed = _parse_dependency_at(sql_text, token.start)
+    if parsed is not None:
+        dependencies.add(parsed)
+
+
+def _parse_dependency_at(sql_text: str, start: int) -> SqlDependency | None:
+    parsed = _parse_multipart_name_at(sql_text, start)
+    if parsed is None:
+        return None
+
+    parts, _ = parsed
+    if len(parts) not in {2, 3}:
+        return None
+    if any(part.startswith(("#", "@")) for part in parts):
+        return None
+    return parts
+
+
+def _parse_multipart_name_at(
+    sql_text: str,
+    start: int,
+) -> tuple[SqlDependency, int] | None:
+    position = _skip_identifier_space(sql_text, start)
+    parts: list[str] = []
+
+    while position < len(sql_text):
+        parsed_part = _parse_identifier_part(sql_text, position)
+        if parsed_part is None:
+            break
+
+        part, position = parsed_part
+        parts.append(part)
+        position = _skip_identifier_space(sql_text, position)
+
+        if position >= len(sql_text) or sql_text[position] != ".":
+            break
+        position = _skip_identifier_space(sql_text, position + 1)
+
+        if len(parts) >= 4:
+            break
+
+    if not parts:
+        return None
+    if len(parts) > 3:
+        return None
+    return tuple(parts), position
+
+
+def _parse_identifier_part(sql_text: str, start: int) -> tuple[str, int] | None:
+    if start >= len(sql_text):
+        return None
+
+    character = sql_text[start]
+    if character == "[":
+        return _parse_bracketed_identifier_part(sql_text, start)
+    if character == '"':
+        return _parse_quoted_identifier_part(sql_text, start)
+    return _parse_bare_identifier_part(sql_text, start)
+
+
+def _parse_bracketed_identifier_part(
+    sql_text: str,
+    start: int,
+) -> tuple[str, int] | None:
+    position = start + 1
+    characters: list[str] = []
+
+    while position < len(sql_text):
+        character = sql_text[position]
+        if character == "]":
+            if position + 1 < len(sql_text) and sql_text[position + 1] == "]":
+                characters.append("]")
+                position += 2
+                continue
+            return "".join(characters), position + 1
+        characters.append(character)
+        position += 1
+
+    return None
+
+
+def _parse_quoted_identifier_part(
+    sql_text: str,
+    start: int,
+) -> tuple[str, int] | None:
+    position = start + 1
+    characters: list[str] = []
+
+    while position < len(sql_text):
+        character = sql_text[position]
+        if character == '"':
+            if position + 1 < len(sql_text) and sql_text[position + 1] == '"':
+                characters.append('"')
+                position += 2
+                continue
+            return "".join(characters), position + 1
+        characters.append(character)
+        position += 1
+
+    return None
+
+
+def _parse_bare_identifier_part(sql_text: str, start: int) -> tuple[str, int] | None:
+    match = re.match(r"[A-Za-z_@#][A-Za-z0-9_@$#]*", sql_text[start:])
+    if not match:
+        return None
+    return match.group(0), start + match.end()
+
+
+def _skip_identifier_space(sql_text: str, start: int) -> int:
+    position = start
+    while position < len(sql_text) and sql_text[position] in " \t\r\n":
+        position += 1
+    return position
+
+
+def _is_from_dependency_boundary(token: _FlatToken) -> bool:
+    if token.value == ";":
+        return True
+
+    keyword = _keyword_head(token)
+    return keyword in _FROM_DEPENDENCY_BOUNDARY_KEYWORDS or (
+        _is_statement_starter(token) and keyword not in {"SELECT"}
+    )
+
+
+def _quote_dependency_part(part: str) -> str:
+    return f"[{part.replace(']', ']]')}]"
 
 
 def _sql_template_path(template_name: str) -> Path:
@@ -529,6 +768,14 @@ def _previous_significant_index(
         if token.depth != depth or _is_trivia(token):
             continue
         return previous
+    return None
+
+
+def _next_significant_index(tokens: list[_FlatToken], index: int) -> int | None:
+    for next_index in range(index, len(tokens)):
+        if _is_trivia(tokens[next_index]):
+            continue
+        return next_index
     return None
 
 

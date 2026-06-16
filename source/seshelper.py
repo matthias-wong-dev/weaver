@@ -9,6 +9,12 @@ from typing import Any
 
 import yaml
 
+from source.sqlwrangle import (
+    SqlDependency,
+    find_sql_dependencies,
+    format_sql_dependency,
+)
+
 
 class SesSyntaxException(ValueError):
     """Raised when an SES SQL file is syntactically invalid."""
@@ -83,6 +89,19 @@ class SesSqlDocument:
     metadata: SesMetadata
     sql_text: str
     metadata_text: str
+    dependencies: frozenset[SqlDependency]
+
+    @property
+    def ses_dependencies(self) -> frozenset[SqlDependency]:
+        return frozenset(
+            dependency for dependency in self.dependencies if len(dependency) == 2
+        )
+
+    @property
+    def external_dependencies(self) -> frozenset[SqlDependency]:
+        return frozenset(
+            dependency for dependency in self.dependencies if len(dependency) == 3
+        )
 
 
 @dataclass(frozen=True)
@@ -103,6 +122,7 @@ class SesRepository:
             if path.is_file()
         ]
         _validate_unique_repository_objects(documents)
+        _validate_repository_dependencies(documents)
         return tuple(documents)
 
     def tables(self) -> tuple[SesSqlDocument, ...]:
@@ -120,11 +140,30 @@ class SesRepository:
         )
 
     def get(self, qualified_name: str) -> SesSqlDocument:
-        lookup_name = qualified_name.lower()
         for document in self.iter_documents():
-            if document.metadata.qualified_name.lower() == lookup_name:
+            if document.metadata.qualified_name == qualified_name:
                 return document
         raise KeyError(f"SES object not found: {qualified_name}")
+
+    def validated_dependencies(
+        self,
+        document_or_name: SesSqlDocument | str,
+    ) -> frozenset[SqlDependency]:
+        documents = self.iter_documents()
+        document = _resolve_repository_document(documents, document_or_name)
+        repository_names = _repository_object_names(documents)
+        return frozenset(
+            dependency
+            for dependency in document.ses_dependencies
+            if dependency in repository_names
+        )
+
+    def dependency_graph(self) -> dict[str, frozenset[SqlDependency]]:
+        documents = self.iter_documents()
+        return {
+            document.metadata.qualified_name: self.validated_dependencies(document)
+            for document in documents
+        }
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -170,6 +209,7 @@ def parse_ses_sql(sql_text: str) -> SesSqlDocument:
         metadata=metadata,
         sql_text=body_sql,
         metadata_text=metadata_text,
+        dependencies=find_sql_dependencies(body_sql),
     )
 
 
@@ -193,12 +233,51 @@ def parse_ses_metadata(metadata_text: str) -> SesMetadata:
 def _validate_unique_repository_objects(documents: list[SesSqlDocument]) -> None:
     seen: set[str] = set()
     for document in documents:
-        lookup_name = document.metadata.qualified_name.lower()
-        if lookup_name in seen:
+        qualified_name = document.metadata.qualified_name
+        if qualified_name in seen:
             raise SesSyntaxException(
                 f"Duplicate SES object in repository: {document.metadata.qualified_name}"
             )
-        seen.add(lookup_name)
+        seen.add(qualified_name)
+
+
+def _validate_repository_dependencies(documents: list[SesSqlDocument]) -> None:
+    repository_names = _repository_object_names(documents)
+    missing_dependencies = [
+        f"{document.metadata.qualified_name} -> {format_sql_dependency(dependency)}"
+        for document in documents
+        for dependency in sorted(document.ses_dependencies)
+        if dependency not in repository_names
+    ]
+
+    if missing_dependencies:
+        raise SesSyntaxException(
+            "Missing SES dependencies in repository: "
+            + "; ".join(missing_dependencies)
+        )
+
+
+def _repository_object_names(
+    documents: tuple[SesSqlDocument, ...] | list[SesSqlDocument],
+) -> set[SqlDependency]:
+    return {
+        (document.metadata.schema, document.metadata.name)
+        for document in documents
+    }
+
+
+def _resolve_repository_document(
+    documents: tuple[SesSqlDocument, ...],
+    document_or_name: SesSqlDocument | str,
+) -> SesSqlDocument:
+    if isinstance(document_or_name, SesSqlDocument):
+        return document_or_name
+
+    for document in documents:
+        if document.metadata.qualified_name == document_or_name:
+            return document
+
+    raise KeyError(f"SES object not found: {document_or_name}")
 
 
 def _split_leading_metadata_block(sql_text: str) -> tuple[str, str]:

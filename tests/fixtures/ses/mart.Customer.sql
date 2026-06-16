@@ -23,4 +23,4 @@ select
     CustomerCode
   , CustomerName
   , CustomerSegment
-from dbo.SourceCustomers
+from ExternalLake.dbo.SourceCustomers

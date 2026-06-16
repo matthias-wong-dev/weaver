@@ -12,6 +12,7 @@ from source.seshelper import (
 
 
 SAMPLE_SQL = Path(__file__).parent / "fixtures" / "ses" / "Schema.Name.sql"
+DAG_DIR = Path(__file__).parent / "fixtures" / "ses_dag"
 
 
 def _sql_with_metadata(metadata: str, body: str = "select 1 as id;\n") -> str:
@@ -44,6 +45,30 @@ def test_read_ses_sql_file_parses_sample_attachment():
     assert document.sql_text.startswith("select ......")
 
 
+def test_read_ses_sql_file_extracts_sql_dependencies():
+    document = read_ses_sql_file(SAMPLE_SQL.parent / "report.CustomerView.sql")
+
+    assert document.dependencies == frozenset({("mart", "Customer")})
+    assert document.ses_dependencies == frozenset({("mart", "Customer")})
+    assert document.external_dependencies == frozenset()
+
+
+def test_read_ses_sql_file_keeps_three_part_dependencies_external():
+    document = read_ses_sql_file(SAMPLE_SQL.parent / "mart.Customer.sql")
+
+    assert document.dependencies == frozenset(
+        {
+            ("ExternalLake", "dbo", "SourceCustomers"),
+        }
+    )
+    assert document.ses_dependencies == frozenset()
+    assert document.external_dependencies == frozenset(
+        {
+            ("ExternalLake", "dbo", "SourceCustomers"),
+        }
+    )
+
+
 def test_read_ses_sql_file_requires_file_name_to_match_object_id(tmp_path):
     mismatched_path = tmp_path / "Wrong.Name.sql"
     mismatched_path.write_text(SAMPLE_SQL.read_text(), encoding="utf-8")
@@ -70,6 +95,103 @@ def test_ses_repository_reads_folder_of_ses_files():
         "report.CustomerView",
     ]
     assert repository.get("mart.Customer").metadata.name == "Customer"
+
+
+def test_ses_repository_builds_validated_dependency_graph_for_dag_fixture():
+    repository = SesRepository(DAG_DIR)
+
+    graph = repository.dependency_graph()
+
+    assert graph == {
+        "audit.CustomerOrderQuality": frozenset(
+            {
+                ("fact", "Order"),
+                ("report", "CustomerOrderSummary"),
+            }
+        ),
+        "dim.Customer": frozenset({("raw", "Customer")}),
+        "dim.Product": frozenset(),
+        "fact.Order": frozenset(
+            {
+                ("dim", "Customer"),
+                ("dim", "Product"),
+                ("raw", "Order"),
+            }
+        ),
+        "raw.Customer": frozenset(),
+        "raw.Order": frozenset({("raw", "Customer")}),
+        "report.CustomerOrderSummary": frozenset(
+            {
+                ("dim", "Customer"),
+                ("dim", "Product"),
+                ("fact", "Order"),
+            }
+        ),
+    }
+
+
+def test_ses_repository_exposes_validated_dependencies_for_one_document():
+    repository = SesRepository(DAG_DIR)
+
+    assert repository.validated_dependencies("fact.Order") == frozenset(
+        {
+            ("dim", "Customer"),
+            ("dim", "Product"),
+            ("raw", "Order"),
+        }
+    )
+    assert repository.get("fact.Order").external_dependencies == frozenset(
+        {
+            ("FinanceDb", "ref", "Fx"),
+        }
+    )
+
+
+def test_ses_repository_rejects_missing_two_part_dependencies(tmp_path):
+    bad_document = tmp_path / "mart.MissingConsumer.sql"
+    bad_document.write_text(
+        _sql_with_metadata(
+            """
+Table ID: mart.MissingConsumer
+Description: Missing dependency example.
+Revisions:
+    - 2026-06-16 Initial.
+""",
+            "select * from missing.Source;\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SesSyntaxException,
+        match=r"mart\.MissingConsumer -> \[missing\]\.\[Source\]",
+    ):
+        SesRepository(tmp_path).iter_documents()
+
+
+def test_ses_repository_dependency_validation_is_case_sensitive(tmp_path):
+    raw_customer = (DAG_DIR / "raw.Customer.sql").read_text(encoding="utf-8")
+    consumer = _sql_with_metadata(
+        """
+Table ID: mart.CaseSensitiveConsumer
+Description: Case-sensitive dependency example.
+Revisions:
+    - 2026-06-16 Initial.
+""",
+        "select * from Raw.Customer;\n",
+    )
+
+    (tmp_path / "raw.Customer.sql").write_text(raw_customer, encoding="utf-8")
+    (tmp_path / "mart.CaseSensitiveConsumer.sql").write_text(
+        consumer,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SesSyntaxException,
+        match=r"mart\.CaseSensitiveConsumer -> \[Raw\]\.\[Customer\]",
+    ):
+        SesRepository(tmp_path).iter_documents()
 
 
 def test_ses_repository_rejects_duplicate_objects(tmp_path):

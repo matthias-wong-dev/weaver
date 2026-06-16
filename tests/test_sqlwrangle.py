@@ -5,6 +5,9 @@ import sqlparse
 from sqlparse import tokens as T
 
 from source.sqlwrangle import (
+    extract_sql_dependencies,
+    find_sql_dependencies,
+    format_sql_dependency,
     get_sql_template,
     insert_ctas,
     insert_select_into,
@@ -39,6 +42,116 @@ def test_get_sql_template_fetches_wipe_template():
     assert "from sys.schemas" in template
     assert "exec sys.sp_executesql @weaver_sql;" in template
     assert "N'information_schema'" in template
+
+
+def test_find_sql_dependencies_extracts_two_and_three_part_relation_names():
+    sql = """
+with recent_customer as (
+    select
+        c.CustomerCode
+    FrOm [raw].[Customer] as c
+    LEFT join ExtDb.crm.CustomerSource as src on src.CustomerCode = c.CustomerCode
+)
+select
+    rc.CustomerCode
+  , p.ProductName
+from recent_customer as rc
+join dim.Product as p on p.ProductCode = rc.ProductCode
+cross apply util.[Split Codes](rc.CustomerCode) as sc
+where
+    exists (
+        select
+            1
+        from [audit].[Customer Check] as chk
+        where
+            chk.CustomerCode = rc.CustomerCode
+    );
+"""
+
+    assert find_sql_dependencies(sql) == frozenset(
+        {
+            ("raw", "Customer"),
+            ("ExtDb", "crm", "CustomerSource"),
+            ("dim", "Product"),
+            ("util", "Split Codes"),
+            ("audit", "Customer Check"),
+        }
+    )
+
+
+def test_find_sql_dependencies_tracks_comma_sources_and_ignores_noise():
+    sql = """
+print 'from fake.Schema should not count';
+-- from comment.Noise should not count
+select
+    a.Id
+  , b.Name
+from dbo.Alpha as a, [dbo].[Beta] as b, #AlreadyMaterialised as m
+where
+    a.Id = b.Id
+    and b.Name in (select Name from tempdb.sys.columns);
+"""
+
+    assert find_sql_dependencies(sql) == frozenset(
+        {
+            ("dbo", "Alpha"),
+            ("dbo", "Beta"),
+            ("tempdb", "sys", "columns"),
+        }
+    )
+
+
+def test_find_sql_dependencies_ignores_select_into_targets_and_alias_columns():
+    sql = """
+select
+    s.CustomerCode
+  , s.SourceName
+into mart.CustomerStage
+from extdb.src.Customer as s
+where
+    s.SourceName = 'dbo.NotATable';
+"""
+
+    assert find_sql_dependencies(sql) == frozenset(
+        {
+            ("extdb", "src", "Customer"),
+        }
+    )
+
+
+def test_find_sql_dependencies_ignores_four_part_names():
+    sql = "select * from LinkedServer.ExternalDb.dbo.Customer;"
+
+    assert find_sql_dependencies(sql) == frozenset()
+
+
+def test_find_sql_dependencies_supports_quoted_identifiers_and_exec():
+    sql = """
+exec "ops"."Refresh Dashboard";
+
+select
+    o.OrderID
+from "sales mart"."Order" as o
+join [dim].[Date]]Odd] as d on d.DateKey = o.OrderDateKey;
+"""
+
+    assert find_sql_dependencies(sql) == frozenset(
+        {
+            ("ops", "Refresh Dashboard"),
+            ("sales mart", "Order"),
+            ("dim", "Date]Odd"),
+        }
+    )
+
+
+def test_format_sql_dependency_brackets_parts():
+    assert format_sql_dependency(("dim", "Date]Odd")) == "[dim].[Date]]Odd]"
+
+
+def test_extract_sql_dependencies_aliases_find_sql_dependencies():
+    sql = "select * from mart.Customer;"
+
+    assert extract_sql_dependencies(sql) == find_sql_dependencies(sql)
 
 
 def test_render_sql_template_populates_named_values():
