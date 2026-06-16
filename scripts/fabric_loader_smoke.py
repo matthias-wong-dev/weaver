@@ -38,32 +38,36 @@ def main() -> None:
     proc_name = f"[_].[ETL dbo.{target_base}]"
 
     cleanup_statements = [
-        f"IF OBJECT_ID(N'{proc_name}', N'P') IS NOT NULL DROP PROCEDURE {proc_name};",
-        f"IF OBJECT_ID(N'[dbo].[{target_base}]', N'V') IS NOT NULL DROP VIEW [dbo].[{target_base}];",
-        f"IF OBJECT_ID(N'[dbo].[{target_base}_Upsert]', N'U') IS NOT NULL DROP TABLE [dbo].[{target_base}_Upsert];",
-        f"IF OBJECT_ID(N'[dbo].[{target_base}_Staging]', N'U') IS NOT NULL DROP TABLE [dbo].[{target_base}_Staging];",
-        f"IF OBJECT_ID(N'[dbo].[{target_base}_History]', N'U') IS NOT NULL DROP TABLE [dbo].[{target_base}_History];",
-        f"IF OBJECT_ID(N'[dbo].[{target_base}_Current]', N'U') IS NOT NULL DROP TABLE [dbo].[{target_base}_Current];",
-        f"IF OBJECT_ID(N'{source_table}', N'U') IS NOT NULL DROP TABLE {source_table};",
+        f"if object_id(N'{proc_name}', N'P') is not null drop procedure {proc_name};",
+        f"if object_id(N'[dbo].[{target_base}]', N'V') is not null drop view [dbo].[{target_base}];",
+        f"if object_id(N'[dbo].[{target_base}_Upsert]', N'U') is not null drop table [dbo].[{target_base}_Upsert];",
+        f"if object_id(N'[dbo].[{target_base}_Staging]', N'U') is not null drop table [dbo].[{target_base}_Staging];",
+        f"if object_id(N'[dbo].[{target_base}_History]', N'U') is not null drop table [dbo].[{target_base}_History];",
+        f"if object_id(N'[dbo].[{target_base}_Current]', N'U') is not null drop table [dbo].[{target_base}_Current];",
+        f"if object_id(N'{source_table}', N'U') is not null drop table {source_table};",
     ]
 
     try:
         for statement in cleanup_statements:
             run_sql(statement)
 
-        run_sql("IF SCHEMA_ID(N'_') IS NULL EXEC(N'CREATE SCHEMA [_]');")
+        run_sql("if schema_id(N'_') is null exec(N'create schema [_]');")
         run_sql(
-            f"""CREATE TABLE {source_table} (
-    [CustomerCode] varchar(20) NOT NULL,
-    [CustomerName] varchar(80) NULL,
-    [Balance] decimal(10,2) NULL
+            f"""create table {source_table} (
+    [CustomerCode] varchar(20) not null
+  , [CustomerName] varchar(80) null
+  , [Balance] decimal(10,2) null
 );"""
         )
         run_sql(
-            f"""INSERT INTO {source_table} ([CustomerCode], [CustomerName], [Balance])
-VALUES
-    ('C001', 'Ada', 10.00),
-    ('C002', 'Grace', 20.00);"""
+            f"""insert into {source_table} (
+    [CustomerCode]
+  , [CustomerName]
+  , [Balance]
+)
+values
+    ('C001', 'Ada', 10.00)
+  , ('C002', 'Grace', 20.00);"""
         )
 
         target_ddl = build_create_table_sql_from_describe_rows(
@@ -108,43 +112,56 @@ VALUES
         run_batches(target_ddl)
 
         procedure_sql = generate_load_stored_procedure_sql(
-            f"SELECT [CustomerCode], [CustomerName], [Balance] FROM {source_table}",
+            f"""select
+    [CustomerCode]
+  , [CustomerName]
+  , [Balance]
+from {source_table}""",
             target_name,
             primary_key_columns=["CustomerCode"],
         )
         run_sql(procedure_sql)
 
-        run_sql(f"EXEC {proc_name};")
+        run_sql(f"exec {proc_name};")
         first_counts = run_sql(
-            f"""SELECT
-    (SELECT COUNT(*) FROM [dbo].[{target_base}_Current]) AS CurrentCount,
-    (SELECT COUNT(*) FROM [dbo].[{target_base}_History]) AS HistoryCount;"""
+            f"""select
+    (select count(*) from [dbo].[{target_base}_Current]) as CurrentCount
+  , (select count(*) from [dbo].[{target_base}_History]) as HistoryCount;"""
         )
         assert first_counts.rows == [(2, 0)], first_counts.rows
 
         run_sql(
-            f"""UPDATE {source_table}
-SET [CustomerName] = 'Ada Lovelace', [Balance] = 15.50
-WHERE [CustomerCode] = 'C001';"""
+            f"""update {source_table}
+set
+    [CustomerName] = 'Ada Lovelace'
+  , [Balance] = 15.50
+where [CustomerCode] = 'C001';"""
         )
-        run_sql(f"DELETE FROM {source_table} WHERE [CustomerCode] = 'C002';")
+        run_sql(f"delete from {source_table} where [CustomerCode] = 'C002';")
         run_sql(
-            f"""INSERT INTO {source_table} ([CustomerCode], [CustomerName], [Balance])
-VALUES ('C003', 'Katherine', 30.00);"""
+            f"""insert into {source_table} (
+    [CustomerCode]
+  , [CustomerName]
+  , [Balance]
+)
+values ('C003', 'Katherine', 30.00);"""
         )
 
-        run_sql(f"EXEC {proc_name};")
+        run_sql(f"exec {proc_name};")
         second_counts = run_sql(
-            f"""SELECT
-    (SELECT COUNT(*) FROM [dbo].[{target_base}_Current]) AS CurrentCount,
-    (SELECT COUNT(*) FROM [dbo].[{target_base}_History]) AS HistoryCount;"""
+            f"""select
+    (select count(*) from [dbo].[{target_base}_Current]) as CurrentCount
+  , (select count(*) from [dbo].[{target_base}_History]) as HistoryCount;"""
         )
         assert second_counts.rows == [(2, 2)], second_counts.rows
 
         final_rows = run_sql(
-            f"""SELECT [CustomerCode], [CustomerName], CONVERT(decimal(10,2), [Balance]) AS Balance
-FROM [dbo].[{target_base}_Current]
-ORDER BY [CustomerCode];"""
+            f"""select
+    [CustomerCode]
+  , [CustomerName]
+  , convert(decimal(10,2), [Balance]) as Balance
+from [dbo].[{target_base}_Current]
+order by [CustomerCode];"""
         )
         assert final_rows.rows == [
             ("C001", "Ada Lovelace", Decimal("15.50")),
@@ -152,12 +169,12 @@ ORDER BY [CustomerCode];"""
         ], final_rows.rows
 
         invariant = run_sql(
-            f"""SELECT COUNT(*) AS MismatchCount
-FROM [dbo].[{target_base}_History] AS h
-INNER JOIN [dbo].[{target_base}_Current] AS c
-    ON c.[CustomerCode] = h.[CustomerCode]
-WHERE h.[CustomerCode] = 'C001'
-    AND h.[Row delete datetime] <> c.[Row update datetime];"""
+            f"""select
+    count(*) as MismatchCount
+from [dbo].[{target_base}_History] as h
+inner join [dbo].[{target_base}_Current] as c on c.[CustomerCode] = h.[CustomerCode]
+where h.[CustomerCode] = 'C001'
+    and h.[Row delete datetime] <> c.[Row update datetime];"""
         )
         assert invariant.rows == [(0,)], invariant.rows
 

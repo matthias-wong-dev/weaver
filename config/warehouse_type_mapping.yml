@@ -3,7 +3,7 @@ preserve_nullability: true
 default_varchar_length: 8000
 default_varbinary_length: 8000
 max_length_token: max
-identity_type: bigint IDENTITY NOT NULL
+identity_type: bigint identity not null
 
 mappings:
   bigint:

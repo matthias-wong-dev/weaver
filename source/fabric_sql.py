@@ -101,7 +101,7 @@ def describe_first_result_set(
 
     with connect(server=server, database=database, timeout=timeout) as conn:
         cursor = conn.cursor()
-        cursor.execute("EXEC sys.sp_describe_first_result_set @tsql = ?", sql)
+        cursor.execute("exec sys.sp_describe_first_result_set @tsql = ?", sql)
         columns = [column[0] for column in cursor.description]
         return [dict(zip(columns, tuple(row))) for row in cursor.fetchall()]
 

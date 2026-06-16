@@ -38,7 +38,7 @@ def test_insert_where_one_eq_zero_guards_every_select_in_serious_sql_fixtures(fi
     transformed = insert_where_one_eq_zero(sql)
 
     assert transformed.count("1=0") == _select_count(sql)
-    assert "SELECT * FROM dbo.Nope" not in transformed
+    assert "SELECT * from dbo.Nope" not in transformed
 
 
 @pytest.mark.parametrize(
@@ -55,7 +55,7 @@ def test_insert_ctas_wraps_one_query_in_serious_sql_fixtures(fixture_name):
     sql = _fixture_sql(fixture_name)
     transformed = insert_ctas(sql, "dbo.ctas_result")
 
-    assert transformed.count("CREATE TABLE dbo.ctas_result AS") == 1
+    assert transformed.count("create table dbo.ctas_result as") == 1
     assert _select_count(transformed) == _select_count(sql)
 
 
@@ -73,22 +73,22 @@ def test_insert_select_into_wraps_one_query_in_serious_sql_fixtures(fixture_name
     sql = _fixture_sql(fixture_name)
     transformed = insert_select_into(sql, "dbo.select_into_result")
 
-    assert transformed.count("INTO dbo.select_into_result") == 1
-    assert transformed.count("CREATE TABLE dbo.select_into_result AS") == 0
+    assert transformed.count("into dbo.select_into_result") == 1
+    assert transformed.count("create table dbo.select_into_result as") == 0
     assert _select_count(transformed) == _select_count(sql)
 
 
 def test_insert_ctas_prefixes_simple_select():
     assert (
-        insert_ctas("SELECT * FROM dbo.Users", "dbo.UsersCopy")
-        == "CREATE TABLE dbo.UsersCopy AS\nSELECT * FROM dbo.Users"
+        insert_ctas("SELECT * from dbo.Users", "dbo.UsersCopy")
+        == "create table dbo.UsersCopy as\nSELECT * from dbo.Users"
     )
 
 
 def test_insert_select_into_modifies_simple_select():
     assert (
-        insert_select_into("SELECT * FROM dbo.Users", "dbo.UsersCopy")
-        == "SELECT * INTO dbo.UsersCopy FROM dbo.Users"
+        insert_select_into("SELECT * from dbo.Users", "dbo.UsersCopy")
+        == "SELECT * into dbo.UsersCopy from dbo.Users"
     )
 
 
@@ -109,7 +109,7 @@ FROM dbo.Users;
 
 DECLARE @x int = 1;
 
-CREATE TABLE dbo.LastResult AS
+create table dbo.LastResult as
 SELECT *
 FROM dbo.Teams
 """
@@ -134,7 +134,7 @@ FROM dbo.Users;
 DECLARE @x int = 1;
 
 SELECT *
-INTO dbo.LastResult
+into dbo.LastResult
 FROM dbo.Teams
 """
     )
@@ -143,33 +143,33 @@ FROM dbo.Teams
 def test_insert_ctas_prefixes_cte_before_with():
     sql = """DECLARE @cutoff date = '2026-01-01';
 
-WITH recent_users AS (
-    SELECT
+WITH recent_users as (
+    select
         u.Id
-    FROM dbo.Users AS u
-    WHERE
+    from dbo.Users as u
+    where
         u.CreatedAt >= @cutoff
 )
-SELECT
+select
     ru.Id
-FROM recent_users AS ru
+FROM recent_users as ru
 """
 
     assert (
         insert_ctas(sql, "dbo.RecentUsers")
         == """DECLARE @cutoff date = '2026-01-01';
 
-CREATE TABLE dbo.RecentUsers AS
-WITH recent_users AS (
-    SELECT
+create table dbo.RecentUsers as
+WITH recent_users as (
+    select
         u.Id
-    FROM dbo.Users AS u
-    WHERE
+    from dbo.Users as u
+    where
         u.CreatedAt >= @cutoff
 )
-SELECT
+select
     ru.Id
-FROM recent_users AS ru
+FROM recent_users as ru
 """
     )
 
@@ -177,55 +177,55 @@ FROM recent_users AS ru
 def test_insert_select_into_modifies_outer_cte_select():
     sql = """DECLARE @cutoff date = '2026-01-01';
 
-WITH recent_users AS (
-    SELECT
+WITH recent_users as (
+    select
         u.Id
-    FROM dbo.Users AS u
-    WHERE
+    from dbo.Users as u
+    where
         u.CreatedAt >= @cutoff
 )
-SELECT
+select
     ru.Id
-FROM recent_users AS ru
+FROM recent_users as ru
 """
 
     assert (
         insert_select_into(sql, "dbo.RecentUsers")
         == """DECLARE @cutoff date = '2026-01-01';
 
-WITH recent_users AS (
-    SELECT
+WITH recent_users as (
+    select
         u.Id
-    FROM dbo.Users AS u
-    WHERE
+    from dbo.Users as u
+    where
         u.CreatedAt >= @cutoff
 )
-SELECT
+select
     ru.Id
-INTO dbo.RecentUsers
-FROM recent_users AS ru
+into dbo.RecentUsers
+FROM recent_users as ru
 """
     )
 
 
 def test_insert_ctas_wraps_entire_union_query():
-    sql = """SELECT
+    sql = """select
     Id
 FROM dbo.Users
-UNION ALL
-SELECT
+union all
+select
     Id
 FROM dbo.ArchivedUsers
 """
 
     assert (
         insert_ctas(sql, "dbo.AllUsers")
-        == """CREATE TABLE dbo.AllUsers AS
-SELECT
+        == """create table dbo.AllUsers as
+select
     Id
 FROM dbo.Users
-UNION ALL
-SELECT
+union all
+select
     Id
 FROM dbo.ArchivedUsers
 """
@@ -233,23 +233,23 @@ FROM dbo.ArchivedUsers
 
 
 def test_insert_select_into_modifies_first_branch_of_union_query():
-    sql = """SELECT
+    sql = """select
     Id
 FROM dbo.Users
-UNION ALL
-SELECT
+union all
+select
     Id
 FROM dbo.ArchivedUsers
 """
 
     assert (
         insert_select_into(sql, "dbo.AllUsers")
-        == """SELECT
+        == """select
     Id
-INTO dbo.AllUsers
+into dbo.AllUsers
 FROM dbo.Users
-UNION ALL
-SELECT
+union all
+select
     Id
 FROM dbo.ArchivedUsers
 """
@@ -257,76 +257,76 @@ FROM dbo.ArchivedUsers
 
 
 def test_insert_ctas_ignores_insert_select_and_uses_last_result_select():
-    sql = """INSERT INTO #UserIds (Id)
-SELECT
+    sql = """INSERT into #UserIds (Id)
+select
     u.Id
-FROM dbo.Users AS u
+FROM dbo.Users as u
 
-SELECT
+select
     t.Id
-FROM dbo.Teams AS t
+FROM dbo.Teams as t
 """
 
     assert (
         insert_ctas(sql, "dbo.TeamResult")
-        == """INSERT INTO #UserIds (Id)
-SELECT
+        == """INSERT into #UserIds (Id)
+select
     u.Id
-FROM dbo.Users AS u
+FROM dbo.Users as u
 
-CREATE TABLE dbo.TeamResult AS
-SELECT
+create table dbo.TeamResult as
+select
     t.Id
-FROM dbo.Teams AS t
+FROM dbo.Teams as t
 """
     )
 
 
 def test_insert_select_into_ignores_insert_select_and_uses_last_result_select():
-    sql = """INSERT INTO #UserIds (Id)
-SELECT
+    sql = """INSERT into #UserIds (Id)
+select
     u.Id
-FROM dbo.Users AS u
+FROM dbo.Users as u
 
-SELECT
+select
     t.Id
-FROM dbo.Teams AS t
+FROM dbo.Teams as t
 """
 
     assert (
         insert_select_into(sql, "dbo.TeamResult")
-        == """INSERT INTO #UserIds (Id)
-SELECT
+        == """INSERT into #UserIds (Id)
+select
     u.Id
-FROM dbo.Users AS u
+FROM dbo.Users as u
 
-SELECT
+select
     t.Id
-INTO dbo.TeamResult
-FROM dbo.Teams AS t
+into dbo.TeamResult
+FROM dbo.Teams as t
 """
     )
 
 
 def test_insert_ctas_handles_declarations_before_final_select_without_semicolon():
     sql = """DECLARE @cutoff date = '2026-01-01'
-SET @cutoff = DATEADD(day, -7, @cutoff)
-SELECT
+set @cutoff = DATEADD(day, -7, @cutoff)
+select
     u.Id
-FROM dbo.Users AS u
-WHERE
+FROM dbo.Users as u
+where
     u.CreatedAt >= @cutoff
 """
 
     assert (
         insert_ctas(sql, "dbo.RecentUsers")
         == """DECLARE @cutoff date = '2026-01-01'
-SET @cutoff = DATEADD(day, -7, @cutoff)
-CREATE TABLE dbo.RecentUsers AS
-SELECT
+set @cutoff = DATEADD(day, -7, @cutoff)
+create table dbo.RecentUsers as
+select
     u.Id
-FROM dbo.Users AS u
-WHERE
+FROM dbo.Users as u
+where
     u.CreatedAt >= @cutoff
 """
     )
@@ -334,23 +334,23 @@ WHERE
 
 def test_insert_select_into_handles_declarations_before_final_select_without_semicolon():
     sql = """DECLARE @cutoff date = '2026-01-01'
-SET @cutoff = DATEADD(day, -7, @cutoff)
-SELECT
+set @cutoff = DATEADD(day, -7, @cutoff)
+select
     u.Id
-FROM dbo.Users AS u
-WHERE
+FROM dbo.Users as u
+where
     u.CreatedAt >= @cutoff
 """
 
     assert (
         insert_select_into(sql, "dbo.RecentUsers")
         == """DECLARE @cutoff date = '2026-01-01'
-SET @cutoff = DATEADD(day, -7, @cutoff)
-SELECT
+set @cutoff = DATEADD(day, -7, @cutoff)
+select
     u.Id
-INTO dbo.RecentUsers
-FROM dbo.Users AS u
-WHERE
+into dbo.RecentUsers
+FROM dbo.Users as u
+where
     u.CreatedAt >= @cutoff
 """
     )
@@ -358,8 +358,8 @@ WHERE
 
 def test_insert_select_into_handles_select_without_from():
     assert (
-        insert_select_into("SELECT 1 AS One", "dbo.OneRow")
-        == "SELECT 1 AS One INTO dbo.OneRow"
+        insert_select_into("SELECT 1 as One", "dbo.OneRow")
+        == "SELECT 1 as One into dbo.OneRow"
     )
 
 
@@ -368,141 +368,141 @@ def test_mixed_case_keywords_work_across_transformers():
 
     assert (
         insert_where_one_eq_zero(sql)
-        == "sEleCt u.Id FrOm dbo.Users as u wHeRe (u.IsActive = 1) AND 1=0 oRdEr bY u.Id"
+        == "sEleCt u.Id FrOm dbo.Users as u wHeRe (u.IsActive = 1) and 1=0 oRdEr bY u.Id"
     )
     assert (
         insert_ctas(sql, "dbo.MixedCase")
-        == "CREATE TABLE dbo.MixedCase AS\nsEleCt u.Id FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
+        == "create table dbo.MixedCase as\nsEleCt u.Id FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
     )
     assert (
         insert_select_into(sql, "dbo.MixedCase")
-        == "sEleCt u.Id INTO dbo.MixedCase FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
+        == "sEleCt u.Id into dbo.MixedCase FrOm dbo.Users as u wHeRe u.IsActive = 1 oRdEr bY u.Id"
     )
 
 
 def test_adds_where_to_simple_select():
-    assert insert_where_one_eq_zero("SELECT * FROM dbo.Users") == "SELECT * FROM dbo.Users WHERE 1=0"
+    assert insert_where_one_eq_zero("SELECT * from dbo.Users") == "SELECT * from dbo.Users where 1=0"
 
 
 def test_wraps_existing_where_condition():
     assert (
-        insert_where_one_eq_zero("SELECT * FROM dbo.Users WHERE IsActive = 1")
-        == "SELECT * FROM dbo.Users WHERE (IsActive = 1) AND 1=0"
+        insert_where_one_eq_zero("SELECT * from dbo.Users where IsActive = 1")
+        == "SELECT * from dbo.Users where (IsActive = 1) and 1=0"
     )
 
 
 def test_inserts_before_order_by():
     assert (
-        insert_where_one_eq_zero("SELECT * FROM dbo.Users ORDER BY CreatedAt DESC")
-        == "SELECT * FROM dbo.Users WHERE 1=0 ORDER BY CreatedAt DESC"
+        insert_where_one_eq_zero("SELECT * from dbo.Users order by CreatedAt DESC")
+        == "SELECT * from dbo.Users where 1=0 order by CreatedAt DESC"
     )
 
 
 def test_preserves_group_by_after_existing_where():
     assert (
-        insert_where_one_eq_zero("SELECT TeamId, COUNT(*) FROM dbo.Users WHERE IsActive = 1 GROUP BY TeamId")
-        == "SELECT TeamId, COUNT(*) FROM dbo.Users WHERE (IsActive = 1) AND 1=0 GROUP BY TeamId"
+        insert_where_one_eq_zero("SELECT TeamId, COUNT(*) from dbo.Users where IsActive = 1 GROUP BY TeamId")
+        == "SELECT TeamId, COUNT(*) from dbo.Users where (IsActive = 1) and 1=0 GROUP BY TeamId"
     )
 
 
 def test_adds_where_after_join():
-    sql = "SELECT u.Id FROM dbo.Users u INNER JOIN dbo.Teams t ON t.Id = u.TeamId"
+    sql = "SELECT u.Id from dbo.Users u INNER join dbo.Teams t on t.Id = u.TeamId"
     assert (
         insert_where_one_eq_zero(sql)
-        == "SELECT u.Id FROM dbo.Users u INNER JOIN dbo.Teams t ON t.Id = u.TeamId WHERE 1=0"
+        == "SELECT u.Id from dbo.Users u INNER join dbo.Teams t on t.Id = u.TeamId where 1=0"
     )
 
 
 def test_transforms_cte_and_outer_select():
-    sql = "WITH cte AS (SELECT Id FROM dbo.Users) SELECT * FROM cte"
+    sql = "WITH cte as (SELECT Id from dbo.Users) select * from cte"
     assert (
         insert_where_one_eq_zero(sql)
-        == "WITH cte AS (SELECT Id FROM dbo.Users WHERE 1=0) SELECT * FROM cte WHERE 1=0"
+        == "WITH cte as (SELECT Id from dbo.Users where 1=0) select * from cte where 1=0"
     )
 
 
 def test_transforms_subquery_in_from_clause():
-    sql = "SELECT * FROM (SELECT Id FROM dbo.Users WHERE IsActive = 1) u"
+    sql = "SELECT * from (SELECT Id from dbo.Users where IsActive = 1) u"
     assert (
         insert_where_one_eq_zero(sql)
-        == "SELECT * FROM (SELECT Id FROM dbo.Users WHERE (IsActive = 1) AND 1=0) u WHERE 1=0"
+        == "SELECT * from (SELECT Id from dbo.Users where (IsActive = 1) and 1=0) u where 1=0"
     )
 
 
 def test_transforms_subquery_inside_existing_where():
-    sql = "SELECT * FROM dbo.Teams WHERE Id IN (SELECT TeamId FROM dbo.Users WHERE IsActive = 1)"
+    sql = "SELECT * from dbo.Teams where Id IN (SELECT TeamId from dbo.Users where IsActive = 1)"
     assert (
         insert_where_one_eq_zero(sql)
-        == "SELECT * FROM dbo.Teams WHERE (Id IN (SELECT TeamId FROM dbo.Users WHERE (IsActive = 1) AND 1=0)) AND 1=0"
+        == "SELECT * from dbo.Teams where (Id IN (SELECT TeamId from dbo.Users where (IsActive = 1) and 1=0)) and 1=0"
     )
 
 
 def test_transforms_each_side_of_union():
-    sql = "SELECT Id FROM dbo.Users UNION ALL SELECT Id FROM dbo.ArchivedUsers WHERE DeletedAt IS NOT NULL"
+    sql = "SELECT Id from dbo.Users union all select Id from dbo.ArchivedUsers where DeletedAt IS NOT NULL"
     assert (
         insert_where_one_eq_zero(sql)
-        == "SELECT Id FROM dbo.Users WHERE 1=0 UNION ALL SELECT Id FROM dbo.ArchivedUsers WHERE (DeletedAt IS NOT NULL) AND 1=0"
+        == "SELECT Id from dbo.Users where 1=0 union all select Id from dbo.ArchivedUsers where (DeletedAt IS NOT NULL) and 1=0"
     )
 
 
 def test_transforms_multiple_statements():
-    sql = "SELECT 1; SELECT 2 WHERE 2 = 2;"
-    assert insert_where_one_eq_zero(sql) == "SELECT 1 WHERE 1=0; SELECT 2 WHERE (2 = 2) AND 1=0;"
+    sql = "SELECT 1; select 2 where 2 = 2;"
+    assert insert_where_one_eq_zero(sql) == "SELECT 1 where 1=0; select 2 where (2 = 2) and 1=0;"
 
 
 def test_handles_tsql_bracketed_identifiers_and_top():
-    sql = "SELECT TOP (10) [User Id] FROM [dbo].[Users] WHERE [Status] = 'A'"
+    sql = "SELECT TOP (10) [User Id] from [dbo].[Users] where [Status] = 'A'"
     assert (
         insert_where_one_eq_zero(sql)
-        == "SELECT TOP (10) [User Id] FROM [dbo].[Users] WHERE ([Status] = 'A') AND 1=0"
+        == "SELECT TOP (10) [User Id] from [dbo].[Users] where ([Status] = 'A') and 1=0"
     )
 
 
 def test_adds_where_to_multiline_select_before_order_by():
-    sql = """SELECT
+    sql = """select
     u.Id,
     u.Name
-FROM dbo.Users AS u
-LEFT JOIN dbo.Teams AS t
-    ON t.Id = u.TeamId
-ORDER BY
+FROM dbo.Users as u
+LEFT join dbo.Teams as t
+    on t.Id = u.TeamId
+order by
     u.Name;
 """
 
     assert (
         insert_where_one_eq_zero(sql)
-        == """SELECT
+        == """select
     u.Id,
     u.Name
-FROM dbo.Users AS u
-LEFT JOIN dbo.Teams AS t
-    ON t.Id = u.TeamId WHERE 1=0
-ORDER BY
+FROM dbo.Users as u
+LEFT join dbo.Teams as t
+    on t.Id = u.TeamId where 1=0
+order by
     u.Name;
 """
     )
 
 
 def test_wraps_existing_multiline_where_before_group_by():
-    sql = """SELECT
+    sql = """select
     t.Id,
-    COUNT(*) AS UserCount
-FROM dbo.Teams AS t
-WHERE
+    COUNT(*) as UserCount
+FROM dbo.Teams as t
+where
     t.IsActive = 1
-    AND t.Region IN ('AU', 'NZ')
+    and t.Region IN ('AU', 'NZ')
 GROUP BY
     t.Id;
 """
 
     assert (
         insert_where_one_eq_zero(sql)
-        == """SELECT
+        == """select
     t.Id,
-    COUNT(*) AS UserCount
-FROM dbo.Teams AS t
-WHERE (t.IsActive = 1
-    AND t.Region IN ('AU', 'NZ')) AND 1=0
+    COUNT(*) as UserCount
+FROM dbo.Teams as t
+where (t.IsActive = 1
+    and t.Region IN ('AU', 'NZ')) and 1=0
 GROUP BY
     t.Id;
 """
@@ -511,90 +511,90 @@ GROUP BY
 
 def test_transforms_long_script_with_comments_temp_table_and_go():
     sql = """-- Build active user extract.
-SELECT
+select
     u.Id,
     u.Email
-INTO #ActiveUsers
-FROM dbo.Users AS u
-WHERE
+into #ActiveUsers
+FROM dbo.Users as u
+where
     u.IsActive = 1;
 
 GO
 
-SELECT
+select
     au.Id,
     p.PlanName
-FROM #ActiveUsers AS au
-JOIN dbo.Plans AS p
-    ON p.UserId = au.Id
-ORDER BY
+FROM #ActiveUsers as au
+join dbo.Plans as p
+    on p.UserId = au.Id
+order by
     au.Id;
 """
 
     assert (
         insert_where_one_eq_zero(sql)
         == """-- Build active user extract.
-SELECT
+select
     u.Id,
     u.Email
-INTO #ActiveUsers
-FROM dbo.Users AS u
-WHERE (u.IsActive = 1) AND 1=0;
+into #ActiveUsers
+FROM dbo.Users as u
+where (u.IsActive = 1) and 1=0;
 
 GO
 
-SELECT
+select
     au.Id,
     p.PlanName
-FROM #ActiveUsers AS au
-JOIN dbo.Plans AS p
-    ON p.UserId = au.Id WHERE 1=0
-ORDER BY
+FROM #ActiveUsers as au
+join dbo.Plans as p
+    on p.UserId = au.Id where 1=0
+order by
     au.Id;
 """
     )
 
 
 def test_transforms_multiline_cte_and_nested_exists():
-    sql = """WITH recent_users AS (
-    SELECT
+    sql = """WITH recent_users as (
+    select
         u.Id,
         u.TeamId
-    FROM dbo.Users AS u
-    WHERE
+    from dbo.Users as u
+    where
         u.CreatedAt >= '2026-01-01'
 )
-SELECT
+select
     t.Id
-FROM dbo.Teams AS t
-WHERE
+FROM dbo.Teams as t
+where
     EXISTS (
-        SELECT
+        select
             1
-        FROM recent_users AS ru
-        WHERE
+        from recent_users as ru
+        where
             ru.TeamId = t.Id
     );
 """
 
     assert (
         insert_where_one_eq_zero(sql)
-        == """WITH recent_users AS (
-    SELECT
+        == """WITH recent_users as (
+    select
         u.Id,
         u.TeamId
-    FROM dbo.Users AS u
-    WHERE (u.CreatedAt >= '2026-01-01') AND 1=0
+    from dbo.Users as u
+    where (u.CreatedAt >= '2026-01-01') and 1=0
 )
-SELECT
+select
     t.Id
-FROM dbo.Teams AS t
-WHERE (EXISTS (
-        SELECT
+FROM dbo.Teams as t
+where (EXISTS (
+        select
             1
-        FROM recent_users AS ru
-        WHERE (ru.TeamId = t.Id) AND 1=0
-    )) AND 1=0;
+        from recent_users as ru
+        where (ru.TeamId = t.Id) and 1=0
+    )) and 1=0;
 """
     )
 
@@ -610,70 +610,70 @@ FROM dbo.Teams
     assert (
         insert_where_one_eq_zero(sql)
         == """SELECT *
-FROM dbo.Users WHERE 1=0
+FROM dbo.Users where 1=0
 GO
 SELECT *
-FROM dbo.Teams WHERE 1=0
+FROM dbo.Teams where 1=0
 """
     )
 
 
 def test_handles_irrelevant_statements_and_adjacent_selects_without_semicolons():
     sql = """DECLARE @cutoff date
-SET @cutoff = '2026-01-01'
-PRINT 'this string says SELECT * FROM dbo.Nope'
--- This comment has SELECT * FROM dbo.CommentOnly
-SELECT @cutoff AS CutoffDate
-SELECT
+set @cutoff = '2026-01-01'
+PRINT 'this string says select * from dbo.Nope'
+-- This comment has select * from dbo.CommentOnly
+SELECT @cutoff as CutoffDate
+select
     u.Id
-FROM dbo.Users AS u
-WHERE
+FROM dbo.Users as u
+where
     u.CreatedAt >= @cutoff
-IF EXISTS (
-    SELECT
+if EXISTS (
+    select
         1
-    FROM dbo.Teams AS t
-    WHERE
+    from dbo.Teams as t
+    where
         t.IsActive = 1
 )
-BEGIN
-    INSERT INTO #UserIds (Id)
-    SELECT
+begin
+    INSERT into #UserIds (Id)
+    select
         u.Id
-    FROM dbo.Users AS u
-    UPDATE dbo.Users SET Seen = 1
-END
+    from dbo.Users as u
+    update dbo.Users set Seen = 1
+end
 """
 
     assert (
         insert_where_one_eq_zero(sql)
         == """DECLARE @cutoff date
-SET @cutoff = '2026-01-01'
-PRINT 'this string says SELECT * FROM dbo.Nope'
--- This comment has SELECT * FROM dbo.CommentOnly
-SELECT @cutoff AS CutoffDate WHERE 1=0
-SELECT
+set @cutoff = '2026-01-01'
+PRINT 'this string says select * from dbo.Nope'
+-- This comment has select * from dbo.CommentOnly
+SELECT @cutoff as CutoffDate where 1=0
+select
     u.Id
-FROM dbo.Users AS u
-WHERE (u.CreatedAt >= @cutoff) AND 1=0
-IF EXISTS (
-    SELECT
+FROM dbo.Users as u
+where (u.CreatedAt >= @cutoff) and 1=0
+if EXISTS (
+    select
         1
-    FROM dbo.Teams AS t
-    WHERE (t.IsActive = 1) AND 1=0
+    from dbo.Teams as t
+    where (t.IsActive = 1) and 1=0
 )
-BEGIN
-    INSERT INTO #UserIds (Id)
-    SELECT
+begin
+    INSERT into #UserIds (Id)
+    select
         u.Id
-    FROM dbo.Users AS u WHERE 1=0
-    UPDATE dbo.Users SET Seen = 1
-END
+    from dbo.Users as u where 1=0
+    update dbo.Users set Seen = 1
+end
 """
     )
 
 
 def test_does_not_treat_tsql_table_hint_with_as_statement_boundary():
-    sql = "SELECT * FROM dbo.Users WITH (NOLOCK)"
+    sql = "SELECT * from dbo.Users WITH (NOLOCK)"
 
-    assert insert_where_one_eq_zero(sql) == "SELECT * FROM dbo.Users WITH (NOLOCK) WHERE 1=0"
+    assert insert_where_one_eq_zero(sql) == "SELECT * from dbo.Users WITH (NOLOCK) where 1=0"

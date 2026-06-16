@@ -96,7 +96,7 @@ def insert_ctas(sql_text: str, table_name: str) -> str:
         return sql_text
 
     return (
-        f"{sql_text[:query_span.start]}CREATE TABLE {table_name} AS\n"
+        f"{sql_text[:query_span.start]}create table {table_name} as\n"
         f"{sql_text[query_span.start:]}"
     )
 
@@ -193,13 +193,13 @@ def _find_select_into_insert_position(
 
 def _select_into_text(sql_text: str, insert_at: int, table_name: str) -> str:
     if insert_at > 0 and sql_text[insert_at - 1] == "\n":
-        return f"INTO {table_name}\n"
+        return f"into {table_name}\n"
     next_non_space = insert_at
     while next_non_space < len(sql_text) and sql_text[next_non_space] in " \t\r\n":
         if sql_text[next_non_space] == "\n":
-            return f"\nINTO {table_name}"
+            return f"\ninto {table_name}"
         next_non_space += 1
-    return f" INTO {table_name}"
+    return f" into {table_name}"
 
 
 def _is_select_into_boundary(token: _FlatToken) -> bool:
@@ -356,7 +356,7 @@ def _replacement_for_select(
         insert_at = _find_insert_position(
             tokens, select_index + 1, scope_end_index, select_token.depth
         )
-        return _Replacement(insert_at, insert_at, " WHERE 1=0")
+        return _Replacement(insert_at, insert_at, " where 1=0")
 
     condition_start = tokens[where_index].end
     condition_end = _find_condition_end(
@@ -367,7 +367,7 @@ def _replacement_for_select(
     return _Replacement(
         condition_start,
         condition_end,
-        f" ({transformed_condition}) AND 1=0",
+        f" ({transformed_condition}) and 1=0",
     )
 
 

@@ -33,7 +33,7 @@ def wrap_create_or_alter_view(sql_text: str, view_name: str) -> str:
     """Wrap query text in a simple CREATE OR ALTER VIEW statement."""
 
     body = _normalise_view_body(sql_text)
-    return f"CREATE OR ALTER VIEW {_quote_multipart_identifier(view_name)} AS\n{body}"
+    return f"create or alter view {_quote_multipart_identifier(view_name)} as\n{body}"
 
 
 def generate_infer_create_table_sql(
@@ -61,12 +61,12 @@ def generate_infer_create_table_sql(
         mapping=mapping,
     )
     return (
-        "/* Weaver generated table-shape inference script. */\n"
-        "SET NOCOUNT ON;\n\n"
-        f"IF OBJECT_ID('tempdb..{temp_table_name}') IS NOT NULL DROP TABLE {temp_table_name};\n\n"
+        "/* weaver generated table-shape inference script. */\n"
+        "set nocount on;\n\n"
+        f"if object_id('tempdb..{temp_table_name}') is not null drop table {temp_table_name};\n\n"
         f"{shape_sql}\n\n"
         f"{create_sql}\n"
-        f"\nDROP TABLE {temp_table_name};\n"
+        f"\ndrop table {temp_table_name};\n"
     )
 
 
@@ -112,7 +112,7 @@ def build_create_table_sql_from_describe_rows(
 
     if identity_column:
         quoted_identity = _quote_identifier_part(identity_column)
-        identity_type = mapping.get("identity_type", "bigint IDENTITY NOT NULL")
+        identity_type = mapping.get("identity_type", "bigint identity not null")
         current_column_definitions.append(f"{quoted_identity} {identity_type}")
         history_column_definitions.append(
             f"{quoted_identity} {_history_identity_type(identity_type)}"
@@ -122,7 +122,7 @@ def build_create_table_sql_from_describe_rows(
     for row, column_name in zip(visible_rows, names):
         warehouse_type = _translate_described_type(row, mapping)
         is_primary_key_column = column_name.lower() in primary_key_lookup
-        nullability = "NOT NULL" if is_primary_key_column or not row.get("is_nullable") else "NULL"
+        nullability = "not null" if is_primary_key_column or not row.get("is_nullable") else "null"
         quoted_column = _quote_identifier_part(column_name)
         column_definition = f"{quoted_column} {warehouse_type} {nullability}"
         current_column_definitions.append(column_definition)
@@ -164,27 +164,31 @@ def generate_load_stored_procedure_sql(
     )
 
     return (
-        "/* Weaver generated ETL procedure installer. */\n"
-        "SET NOCOUNT ON;\n\n"
-        "IF SCHEMA_ID(N'_') IS NULL EXEC(N'CREATE SCHEMA [_]');\n\n"
-        "DECLARE @weaver_proc_sql nvarchar(max);\n"
-        "DECLARE @weaver_source_columns nvarchar(max);\n"
-        "DECLARE @weaver_staging_select_columns nvarchar(max);\n"
-        "DECLARE @weaver_upsert_select_columns nvarchar(max);\n"
-        "DECLARE @weaver_target_select_columns nvarchar(max);\n"
-        "DECLARE @weaver_history_columns nvarchar(max);\n"
-        "DECLARE @weaver_history_select_columns nvarchar(max);\n"
-        "DECLARE @weaver_update_set_columns nvarchar(max);\n\n"
+        "/* weaver generated etl procedure installer. */\n"
+        "set nocount on;\n\n"
+        "if schema_id(N'_') is null exec(N'create schema [_]');\n\n"
+        "declare @weaver_proc_sql nvarchar(max);\n"
+        "declare @weaver_source_columns nvarchar(max);\n"
+        "declare @weaver_staging_select_columns nvarchar(max);\n"
+        "declare @weaver_staging_except_columns nvarchar(max);\n"
+        "declare @weaver_upsert_select_columns nvarchar(max);\n"
+        "declare @weaver_target_select_columns nvarchar(max);\n"
+        "declare @weaver_target_except_columns nvarchar(max);\n"
+        "declare @weaver_history_columns nvarchar(max);\n"
+        "declare @weaver_history_select_columns nvarchar(max);\n"
+        "declare @weaver_update_set_columns nvarchar(max);\n\n"
         f"{_render_installer_column_metadata_sql(table_names, primary_key_columns)}\n\n"
-        f"SET @weaver_proc_sql = {_sql_string_literal(procedure_template)};\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__SOURCE_COLUMNS__', @weaver_source_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__STAGING_SELECT_COLUMNS__', @weaver_staging_select_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__UPSERT_SELECT_COLUMNS__', @weaver_upsert_select_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__TARGET_SELECT_COLUMNS__', @weaver_target_select_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__HISTORY_COLUMNS__', @weaver_history_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__HISTORY_SELECT_COLUMNS__', @weaver_history_select_columns);\n"
-        "SET @weaver_proc_sql = REPLACE(@weaver_proc_sql, N'__UPDATE_SET_COLUMNS__', @weaver_update_set_columns);\n\n"
-        "EXEC sys.sp_executesql @weaver_proc_sql;"
+        f"set @weaver_proc_sql = {_sql_string_literal(procedure_template)};\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__SOURCE_COLUMNS__', @weaver_source_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__STAGING_SELECT_COLUMNS__', @weaver_staging_select_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__STAGING_EXCEPT_COLUMNS__', @weaver_staging_except_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__UPSERT_SELECT_COLUMNS__', @weaver_upsert_select_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__TARGET_SELECT_COLUMNS__', @weaver_target_select_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__TARGET_EXCEPT_COLUMNS__', @weaver_target_except_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__HISTORY_COLUMNS__', @weaver_history_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__HISTORY_SELECT_COLUMNS__', @weaver_history_select_columns);\n"
+        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__UPDATE_SET_COLUMNS__', @weaver_update_set_columns);\n\n"
+        "exec sys.sp_executesql @weaver_proc_sql;"
     )
 
 
@@ -203,19 +207,19 @@ def _render_static_load_procedure_template(
         load_body = _render_static_full_refresh_load_body(table_names=table_names)
 
     return (
-        f"CREATE OR ALTER PROCEDURE {table_names.load_procedure}\n"
-        "AS\n"
-        "BEGIN\n"
-        "    SET NOCOUNT ON;\n"
-        "    DECLARE @weaver_load_datetime datetime2(6) = SYSUTCDATETIME();\n"
+        f"create or alter procedure {table_names.load_procedure}\n"
+        "as\n"
+        "begin\n"
+        "    set nocount on;\n"
+        "    declare @weaver_load_datetime datetime2(6) = sysutcdatetime();\n"
         "\n"
-        f"    IF OBJECT_ID({_sql_string_literal(table_names.upsert_table)}, N'U') IS NOT NULL DROP TABLE {table_names.upsert_table};\n"
-        f"    IF OBJECT_ID({_sql_string_literal(table_names.staging_table)}, N'U') IS NOT NULL DROP TABLE {table_names.staging_table};\n\n"
+        f"    if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
+        f"    if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};\n\n"
         f"{_indent_sql(runtime_staging_sql, 4)}\n\n"
         f"{_indent_sql(load_body, 4)}\n\n"
-        f"    IF OBJECT_ID({_sql_string_literal(table_names.upsert_table)}, N'U') IS NOT NULL DROP TABLE {table_names.upsert_table};\n"
-        f"    IF OBJECT_ID({_sql_string_literal(table_names.staging_table)}, N'U') IS NOT NULL DROP TABLE {table_names.staging_table};\n"
-        "END;"
+        f"    if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
+        f"    if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};\n"
+        "end;"
     )
 
 
@@ -314,17 +318,17 @@ def _normalise_identifier_name(identifier: str) -> str:
 
 def _current_row_datetime_definitions() -> list[str]:
     return [
-        "[Row insert datetime] datetime2(6) NULL",
-        "[Row update datetime] datetime2(6) NULL",
-        "[Row delete datetime] datetime2(6) NOT NULL",
+        "[Row insert datetime] datetime2(6) null",
+        "[Row update datetime] datetime2(6) null",
+        "[Row delete datetime] datetime2(6) not null",
     ]
 
 
 def _history_row_datetime_definitions() -> list[str]:
     return [
-        "[Row insert datetime] datetime2(6) NULL",
-        "[Row update datetime] datetime2(6) NULL",
-        "[Row delete datetime] datetime2(6) NOT NULL",
+        "[Row insert datetime] datetime2(6) null",
+        "[Row update datetime] datetime2(6) null",
+        "[Row delete datetime] datetime2(6) not null",
     ]
 
 
@@ -340,13 +344,9 @@ def _render_backing_table_and_view_sql(
     view_columns: list[str],
     primary_key_columns: list[str],
 ) -> str:
-    joined_current_columns = ",\n".join(
-        f"    {definition}" for definition in current_column_definitions
-    )
-    joined_history_columns = ",\n".join(
-        f"    {definition}" for definition in history_column_definitions
-    )
-    joined_view_columns = ",\n".join(f"    {column}" for column in view_columns)
+    joined_current_columns = _join_leading_comma_list(current_column_definitions)
+    joined_history_columns = _join_leading_comma_list(history_column_definitions)
+    joined_view_columns = _join_leading_comma_list(view_columns)
     primary_key_sql = _render_primary_key_sql(
         table_names=table_names,
         primary_key_columns=primary_key_columns,
@@ -357,18 +357,31 @@ def _render_backing_table_and_view_sql(
     post_create_section = f"\n\n{post_create_sql}" if post_create_sql else ""
 
     return (
-        f"CREATE TABLE {table_names.current_table} (\n"
+        f"create table {table_names.current_table} (\n"
         f"{joined_current_columns}\n"
         ");\n\n"
-        f"CREATE TABLE {table_names.history_table} (\n"
+        f"create table {table_names.history_table} (\n"
         f"{joined_history_columns}\n"
         ");"
         f"{post_create_section}\n\n"
-        f"CREATE OR ALTER VIEW {table_names.view_name} AS\n"
-        "SELECT\n"
+        f"create or alter view {table_names.view_name} as\n"
+        "select\n"
         f"{joined_view_columns}\n"
-        f"FROM {table_names.current_table};"
+        f"from {table_names.current_table};"
     )
+
+
+def _join_leading_comma_list(
+    items: list[str],
+    *,
+    first_indent: str = "    ",
+    comma_indent: str = "  ",
+) -> str:
+    if not items:
+        return ""
+    lines = [f"{first_indent}{items[0]}"]
+    lines.extend(f"{comma_indent}, {item}" for item in items[1:])
+    return "\n".join(lines)
 
 
 def _render_primary_key_sql(
@@ -383,32 +396,36 @@ def _render_primary_key_sql(
         _quote_identifier_part(column_name) for column_name in primary_key_columns
     )
     return (
-        f"ALTER TABLE {table_names.current_table} "
-        f"ADD CONSTRAINT {table_names.current_pk_constraint} "
-        f"PRIMARY KEY NONCLUSTERED ({joined_key_columns}) NOT ENFORCED;"
+        f"alter table {table_names.current_table} "
+        f"add constraint {table_names.current_pk_constraint} "
+        f"primary key nonclustered ({joined_key_columns}) not enforced;"
     )
 
 
 def _render_primary_key_columns_cte(primary_key_columns: list[str]) -> str:
     if not primary_key_columns:
         return (
-            "    SELECT\n"
-            "        CONVERT(int, NULL) AS column_ordinal,\n"
-            "        CONVERT(nvarchar(128), NULL) AS column_name\n"
-            "    WHERE 1 = 0"
+            "    select\n"
+            "        convert(int, null) as column_ordinal\n"
+            "      , convert(nvarchar(128), null) as column_name\n"
+            "    where 1 = 0"
         )
 
-    values = ",\n".join(
-        f"        ({index}, {_sql_string_literal(column_name)})"
-        for index, column_name in enumerate(primary_key_columns, start=1)
+    values = _join_leading_comma_list(
+        [
+            f"({index}, {_sql_string_literal(column_name)})"
+            for index, column_name in enumerate(primary_key_columns, start=1)
+        ],
+        first_indent="        ",
+        comma_indent="      ",
     )
     return (
-        "    SELECT\n"
-        "        column_ordinal,\n"
-        "        column_name\n"
-        "    FROM (VALUES\n"
+        "    select\n"
+        "        column_ordinal\n"
+        "      , column_name\n"
+        "    from (values\n"
         f"{values}\n"
-        "    ) AS pk(column_ordinal, column_name)"
+        "    ) as pk(column_ordinal, column_name)"
     )
 
 
@@ -418,82 +435,133 @@ def _render_installer_column_metadata_sql(
 ) -> str:
     primary_key_values = _render_primary_key_name_values(primary_key_columns)
     source_column_filter = (
-        "c.name NOT IN (N'Row insert datetime', N'Row update datetime', N'Row delete datetime')\n"
-        "    AND c.is_identity = 0"
+        "c.name not in (N'Row insert datetime', N'Row update datetime', N'Row delete datetime')\n"
+        "        and c.is_identity = 0"
     )
     primary_key_filter = (
-        f"AND LOWER(c.name) NOT IN (\n{primary_key_values}\n)"
+        f"and lower(c.name) not in (\n{primary_key_values}\n        )"
         if primary_key_columns
         else ""
     )
     update_select = (
-        "SELECT\n"
+        ";with update_columns as (\n"
+        "    select\n"
+        "        c.name\n"
+        "      , c.column_id\n"
+        "      , row_number() over (order by c.column_id) as row_ordinal\n"
+        "    from sys.columns as c\n"
+        f"    where c.[object_id] = object_id({_sql_string_literal(table_names.current_table)})\n"
+        f"        and {source_column_filter}\n"
+        f"        {primary_key_filter}\n"
+        ")\n"
+        "select\n"
         "    @weaver_update_set_columns =\n"
-        "        COALESCE(\n"
-        "            STRING_AGG(N'c.' + QUOTENAME(c.name) + N' = u.' + QUOTENAME(c.name), N', ')\n"
-        "                WITHIN GROUP (ORDER BY c.column_id)\n"
-        "            + N', ',\n"
+        "        coalesce(\n"
+        "            string_agg(\n"
+        "                case\n"
+        "                    when row_ordinal = 1 then N'c.' + quotename(name) + N' = u.' + quotename(name)\n"
+        "                    else char(10) + N'          , c.' + quotename(name) + N' = u.' + quotename(name)\n"
+        "                end,\n"
+        "                N''\n"
+        "            ) within group (order by column_id)\n"
+        "            + char(10) + N'          , ',\n"
         "            N''\n"
         "        )\n"
-        "        + N'c.[Row update datetime] = @weaver_load_datetime, '\n"
-        "        + N'c.[Row delete datetime] = CONVERT(datetime2(6), ''9999-12-31 00:00:00'')'\n"
-        "FROM sys.columns AS c\n"
-        f"WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.current_table)})\n"
-        f"    AND {source_column_filter}\n"
-        f"    {primary_key_filter};"
+        "        + N'c.[Row update datetime] = @weaver_load_datetime'\n"
+        "        + char(10) + N'          , c.[Row delete datetime] = convert(datetime2(6), ''9999-12-31 00:00:00'')'\n"
+        "from update_columns;"
         if primary_key_columns
-        else "SET @weaver_update_set_columns = N'';"
+        else "set @weaver_update_set_columns = N'';"
     )
 
-    return f"""SELECT
-    @weaver_source_columns = STRING_AGG(QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_staging_select_columns = STRING_AGG(N's.' + QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_upsert_select_columns = STRING_AGG(N'u.' + QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_target_select_columns = STRING_AGG(N't.' + QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id)
-FROM sys.columns AS c
-WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.current_table)})
-    AND {source_column_filter};
+    return f""";with source_columns as (
+    select
+        c.name
+      , c.column_id
+      , row_number() over (order by c.column_id) as row_ordinal
+    from sys.columns as c
+    where c.[object_id] = object_id({_sql_string_literal(table_names.current_table)})
+        and {source_column_filter}
+)
+select
+    @weaver_source_columns = string_agg(
+        case when row_ordinal = 1 then quotename(name) else char(10) + N'      , ' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_staging_select_columns = string_agg(
+        case when row_ordinal = 1 then N's.' + quotename(name) else char(10) + N'      , s.' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_staging_except_columns = string_agg(
+        case when row_ordinal = 1 then N's.' + quotename(name) else char(10) + N'                  , s.' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_upsert_select_columns = string_agg(
+        case when row_ordinal = 1 then N'u.' + quotename(name) else char(10) + N'      , u.' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_target_select_columns = string_agg(
+        case when row_ordinal = 1 then N't.' + quotename(name) else char(10) + N'      , t.' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_target_except_columns = string_agg(
+        case when row_ordinal = 1 then N't.' + quotename(name) else char(10) + N'                  , t.' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+from source_columns;
 
-SELECT
-    @weaver_history_columns = STRING_AGG(QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_history_select_columns = STRING_AGG(
-        CASE
-            WHEN c.name = N'Row delete datetime' THEN N'@weaver_load_datetime AS ' + QUOTENAME(c.name)
-            ELSE N'c.' + QUOTENAME(c.name)
-        END,
-        N', '
-    ) WITHIN GROUP (ORDER BY c.column_id)
-FROM sys.columns AS c
-WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.history_table)});
+;with history_columns as (
+    select
+        c.name
+      , c.column_id
+      , row_number() over (order by c.column_id) as row_ordinal
+    from sys.columns as c
+    where c.[object_id] = object_id({_sql_string_literal(table_names.history_table)})
+)
+select
+    @weaver_history_columns = string_agg(
+        case when row_ordinal = 1 then quotename(name) else char(10) + N'          , ' + quotename(name) end,
+        N''
+    ) within group (order by column_id)
+  , @weaver_history_select_columns = string_agg(
+        case
+            when name = N'Row delete datetime' and row_ordinal = 1 then N'@weaver_load_datetime as ' + quotename(name)
+            when name = N'Row delete datetime' then char(10) + N'          , @weaver_load_datetime as ' + quotename(name)
+            when row_ordinal = 1 then N'c.' + quotename(name)
+            else char(10) + N'          , c.' + quotename(name)
+        end,
+        N''
+    ) within group (order by column_id)
+from history_columns;
 
 {update_select}
 
-IF @weaver_source_columns IS NULL
-BEGIN
-    THROW 51002, 'Weaver current table has no source columns to load.', 1;
-END;
+if @weaver_source_columns is null
+begin
+    throw 51002, 'weaver current table has no source columns to load.', 1;
+end;
 
-IF @weaver_history_columns IS NULL
-BEGIN
-    THROW 51003, 'Weaver history table does not exist or has no columns.', 1;
-END;"""
+if @weaver_history_columns is null
+begin
+    throw 51003, 'weaver history table does not exist or has no columns.', 1;
+end;"""
 
 
 def _render_static_full_refresh_load_body(*, table_names: _TableNames) -> str:
-    return f"""DELETE FROM {table_names.current_table};
+    return f"""delete from {table_names.current_table};
 
-INSERT INTO {table_names.current_table} (
-    __SOURCE_COLUMNS__,
-    [Row insert datetime],
-    [Row update datetime],
-    [Row delete datetime]
+insert into {table_names.current_table} (
+    __SOURCE_COLUMNS__
+  , [Row insert datetime]
+  , [Row update datetime]
+  , [Row delete datetime]
 )
-SELECT
-    __STAGING_SELECT_COLUMNS__,
-    @weaver_load_datetime,
-    @weaver_load_datetime,
-    CONVERT(datetime2(6), '9999-12-31 00:00:00')
-FROM {table_names.staging_table} AS s;"""
+select
+    __STAGING_SELECT_COLUMNS__
+  , @weaver_load_datetime
+  , @weaver_load_datetime
+  , convert(datetime2(6), '9999-12-31 00:00:00')
+from {table_names.staging_table} as s;"""
 
 
 def _render_static_primary_key_load_body(
@@ -506,326 +574,114 @@ def _render_static_primary_key_load_body(
     history_upsert_join = _pk_join_predicate("h", "u", primary_key_columns)
     staging_current_join = _pk_join_predicate("s", "c", primary_key_columns)
     staging_history_join = _pk_join_predicate("s", "h", primary_key_columns)
-    target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} IS NULL"
+    target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} is null"
     delete_missing_filter = (
-        f"NOT EXISTS (SELECT 1 FROM {table_names.staging_table} AS s "
-        f"WHERE {staging_current_join})"
+        f"not exists (select 1 from {table_names.staging_table} as s "
+        f"where {staging_current_join})"
     )
     delete_history_unwind_filter = (
-        f"NOT EXISTS (SELECT 1 FROM {table_names.staging_table} AS s "
-        f"WHERE {staging_history_join})"
+        f"not exists (select 1 from {table_names.staging_table} as s "
+        f"where {staging_history_join})"
     )
 
-    return f"""CREATE TABLE {table_names.upsert_table} AS
-SELECT
-    __STAGING_SELECT_COLUMNS__,
-    CASE WHEN {target_missing_predicate} THEN CAST(1 AS int) ELSE CAST(0 AS int) END AS [_Is new row]
-FROM {table_names.staging_table} AS s
-LEFT JOIN {table_names.view_name} AS t
-    ON {staging_target_join}
-WHERE {target_missing_predicate}
-    OR EXISTS (
-        SELECT
-            __STAGING_SELECT_COLUMNS__
-        EXCEPT
-        SELECT
-            __TARGET_SELECT_COLUMNS__
-    );
-
-INSERT INTO {table_names.current_table} (
-    __SOURCE_COLUMNS__,
-    [Row insert datetime],
-    [Row update datetime],
-    [Row delete datetime]
-)
-SELECT
-    __UPSERT_SELECT_COLUMNS__,
-    @weaver_load_datetime,
-    @weaver_load_datetime,
-    CONVERT(datetime2(6), '9999-12-31 00:00:00')
-FROM {table_names.upsert_table} AS u
-WHERE u.[_Is new row] = 1;
-
-BEGIN TRY
-    INSERT INTO {table_names.history_table} (
-        __HISTORY_COLUMNS__
-    )
-    SELECT
-        __HISTORY_SELECT_COLUMNS__
-    FROM {table_names.current_table} AS c
-    INNER JOIN {table_names.upsert_table} AS u
-        ON {current_upsert_join}
-    WHERE u.[_Is new row] = 0;
-
-    UPDATE c
-    SET __UPDATE_SET_COLUMNS__
-    FROM {table_names.current_table} AS c
-    INNER JOIN {table_names.upsert_table} AS u
-        ON {current_upsert_join}
-    WHERE u.[_Is new row] = 0;
-END TRY
-BEGIN CATCH
-    DELETE h
-    FROM {table_names.history_table} AS h
-    INNER JOIN {table_names.upsert_table} AS u
-        ON {history_upsert_join}
-    WHERE u.[_Is new row] = 0
-        AND h.[Row delete datetime] = @weaver_load_datetime;
-
-    THROW;
-END CATCH;
-
-BEGIN TRY
-    INSERT INTO {table_names.history_table} (
-        __HISTORY_COLUMNS__
-    )
-    SELECT
-        __HISTORY_SELECT_COLUMNS__
-    FROM {table_names.current_table} AS c
-    WHERE {delete_missing_filter};
-
-    DELETE c
-    FROM {table_names.current_table} AS c
-    WHERE {delete_missing_filter};
-END TRY
-BEGIN CATCH
-    DELETE h
-    FROM {table_names.history_table} AS h
-    WHERE h.[Row delete datetime] = @weaver_load_datetime
-        AND {delete_history_unwind_filter};
-
-    THROW;
-END CATCH;"""
-
-
-def _render_column_metadata_sql(table_names: _TableNames) -> str:
-    return f"""SELECT
-    @weaver_source_columns = STRING_AGG(QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_staging_select_columns = STRING_AGG(N's.' + QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_upsert_select_columns = STRING_AGG(N'u.' + QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id)
-FROM sys.columns AS c
-WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.staging_table)});
-
-SELECT
-    @weaver_history_columns = STRING_AGG(QUOTENAME(c.name), N', ') WITHIN GROUP (ORDER BY c.column_id),
-    @weaver_history_select_columns = STRING_AGG(
-        CASE
-            WHEN c.name = N'Row delete datetime' THEN N'@weaver_load_datetime AS ' + QUOTENAME(c.name)
-            ELSE N'c.' + QUOTENAME(c.name)
-        END,
-        N', '
-    ) WITHIN GROUP (ORDER BY c.column_id)
-FROM sys.columns AS c
-WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.history_table)});
-
-IF @weaver_source_columns IS NULL
-BEGIN
-    THROW 51002, 'Weaver staging table has no columns to load.', 1;
-END;
-
-IF @weaver_history_columns IS NULL
-BEGIN
-    THROW 51003, 'Weaver history table does not exist or has no columns.', 1;
-END;"""
-
-
-def _render_full_refresh_load_body(*, table_names: _TableNames) -> str:
-    return f"""DELETE FROM {table_names.current_table};
-
-SET @weaver_sql =
-    N'INSERT INTO {table_names.current_table} ('
-    + @weaver_source_columns
-    + N', [Row insert datetime], [Row update datetime], [Row delete datetime]) '
-    + N'SELECT '
-    + @weaver_staging_select_columns
-    + N', @weaver_load_datetime, @weaver_load_datetime, CONVERT(datetime2(6), ''9999-12-31 00:00:00'') '
-    + N'FROM {table_names.staging_table} AS s;';
-
-EXEC sys.sp_executesql
-    @weaver_sql,
-    N'@weaver_load_datetime datetime2(6)',
-    @weaver_load_datetime = @weaver_load_datetime;"""
-
-
-def _render_primary_key_load_body(
-    *,
-    table_names: _TableNames,
-    primary_key_columns: list[str],
-) -> str:
-    staging_target_join = _pk_join_predicate("s", "t", primary_key_columns)
-    current_upsert_join = _pk_join_predicate("c", "u", primary_key_columns)
-    history_upsert_join = _pk_join_predicate("h", "u", primary_key_columns)
-    staging_current_join = _pk_join_predicate("s", "c", primary_key_columns)
-    staging_history_join = _pk_join_predicate("s", "h", primary_key_columns)
-    target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} IS NULL"
-    update_history_filter = "u.[_Is new row] = 0"
-    insert_filter = "u.[_Is new row] = 1"
-    delete_missing_filter = (
-        f"NOT EXISTS (SELECT 1 FROM {table_names.staging_table} AS s "
-        f"WHERE {staging_current_join})"
-    )
-    delete_history_unwind_filter = (
-        f"NOT EXISTS (SELECT 1 FROM {table_names.staging_table} AS s "
-        f"WHERE {staging_history_join})"
-    )
-    primary_key_values = _render_primary_key_name_values(primary_key_columns)
-
-    return f"""{_render_primary_key_validation_sql(table_names, primary_key_columns)}
-
-SELECT
-    @weaver_update_set_columns =
-        STRING_AGG(N'c.' + QUOTENAME(c.name) + N' = u.' + QUOTENAME(c.name), N', ')
-            WITHIN GROUP (ORDER BY c.column_id)
-FROM sys.columns AS c
-WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.staging_table)})
-    AND LOWER(c.name) NOT IN (
-{primary_key_values}
-    );
-
-SET @weaver_update_set_columns =
-    COALESCE(@weaver_update_set_columns + N', ', N'')
-    + N'c.[Row update datetime] = @weaver_load_datetime, '
-    + N'c.[Row delete datetime] = CONVERT(datetime2(6), ''9999-12-31 00:00:00'')';
-
-SET @weaver_sql =
-    N'CREATE TABLE {table_names.upsert_table} AS '
-    + N'SELECT '
-    + @weaver_staging_select_columns
-    + N', CASE WHEN {target_missing_predicate} THEN CAST(1 AS int) ELSE CAST(0 AS int) END AS [_Is new row] '
-    + N'FROM {table_names.staging_table} AS s '
-    + N'LEFT JOIN {table_names.view_name} AS t ON {staging_target_join} '
-    + N'WHERE {target_missing_predicate} '
-    + N'OR EXISTS ('
-    + N'SELECT ' + @weaver_staging_select_columns + N' '
-    + N'EXCEPT '
-    + N'SELECT ' + REPLACE(@weaver_staging_select_columns, N's.', N't.') + N');';
-
-EXEC sys.sp_executesql @weaver_sql;
-
-SET @weaver_sql =
-    N'INSERT INTO {table_names.current_table} ('
-    + @weaver_source_columns
-    + N', [Row insert datetime], [Row update datetime], [Row delete datetime]) '
-    + N'SELECT '
-    + @weaver_upsert_select_columns
-    + N', @weaver_load_datetime, @weaver_load_datetime, CONVERT(datetime2(6), ''9999-12-31 00:00:00'') '
-    + N'FROM {table_names.upsert_table} AS u '
-    + N'WHERE {insert_filter};';
-
-EXEC sys.sp_executesql
-    @weaver_sql,
-    N'@weaver_load_datetime datetime2(6)',
-    @weaver_load_datetime = @weaver_load_datetime;
-
-BEGIN TRY
-    SET @weaver_sql =
-        N'INSERT INTO {table_names.history_table} ('
-        + @weaver_history_columns
-        + N') SELECT '
-        + @weaver_history_select_columns
-        + N' FROM {table_names.current_table} AS c '
-        + N'INNER JOIN {table_names.upsert_table} AS u ON {current_upsert_join} '
-        + N'WHERE {update_history_filter};';
-
-    EXEC sys.sp_executesql
-        @weaver_sql,
-        N'@weaver_load_datetime datetime2(6)',
-        @weaver_load_datetime = @weaver_load_datetime;
-
-    SET @weaver_sql =
-        N'UPDATE c SET '
-        + @weaver_update_set_columns
-        + N' FROM {table_names.current_table} AS c '
-        + N'INNER JOIN {table_names.upsert_table} AS u ON {current_upsert_join} '
-        + N'WHERE {update_history_filter};';
-
-    EXEC sys.sp_executesql
-        @weaver_sql,
-        N'@weaver_load_datetime datetime2(6)',
-        @weaver_load_datetime = @weaver_load_datetime;
-END TRY
-BEGIN CATCH
-    SET @weaver_sql =
-        N'DELETE h FROM {table_names.history_table} AS h '
-        + N'INNER JOIN {table_names.upsert_table} AS u ON {history_upsert_join} '
-        + N'WHERE {update_history_filter} '
-        + N'AND h.[Row delete datetime] = @weaver_load_datetime;';
-
-    EXEC sys.sp_executesql
-        @weaver_sql,
-        N'@weaver_load_datetime datetime2(6)',
-        @weaver_load_datetime = @weaver_load_datetime;
-
-    THROW;
-END CATCH;
-
-BEGIN TRY
-    SET @weaver_sql =
-        N'INSERT INTO {table_names.history_table} ('
-        + @weaver_history_columns
-        + N') SELECT '
-        + @weaver_history_select_columns
-        + N' FROM {table_names.current_table} AS c '
-        + N'WHERE {delete_missing_filter};';
-
-    EXEC sys.sp_executesql
-        @weaver_sql,
-        N'@weaver_load_datetime datetime2(6)',
-        @weaver_load_datetime = @weaver_load_datetime;
-
-    SET @weaver_sql =
-        N'DELETE c FROM {table_names.current_table} AS c '
-        + N'WHERE {delete_missing_filter};';
-
-    EXEC sys.sp_executesql @weaver_sql;
-END TRY
-BEGIN CATCH
-    SET @weaver_sql =
-        N'DELETE h FROM {table_names.history_table} AS h '
-        + N'WHERE h.[Row delete datetime] = @weaver_load_datetime '
-        + N'AND {delete_history_unwind_filter};';
-
-    EXEC sys.sp_executesql
-        @weaver_sql,
-        N'@weaver_load_datetime datetime2(6)',
-        @weaver_load_datetime = @weaver_load_datetime;
-
-    THROW;
-END CATCH;"""
-
-
-def _render_primary_key_validation_sql(
-    table_names: _TableNames,
-    primary_key_columns: list[str],
-) -> str:
-    checks = []
-    for column_name in primary_key_columns:
-        checks.append(
-            "IF NOT EXISTS (\n"
-            "    SELECT 1\n"
-            "    FROM sys.columns AS c\n"
-            f"    WHERE c.[object_id] = OBJECT_ID({_sql_string_literal(table_names.staging_table)})\n"
-            f"        AND c.name = {_sql_string_literal(column_name)}\n"
-            ")\n"
-            "BEGIN\n"
-            f"    THROW 51004, 'Weaver primary key column {column_name} is missing from staging.', 1;\n"
-            "END;"
+    return f"""create table {table_names.upsert_table} as
+select
+    __STAGING_SELECT_COLUMNS__
+  , case when {target_missing_predicate} then cast(1 as int) else cast(0 as int) end as [_Is new row]
+from {table_names.staging_table} as s
+left join {table_names.view_name} as t on {staging_target_join}
+where
+    (
+        {target_missing_predicate}
+        or exists (
+            select
+                __STAGING_EXCEPT_COLUMNS__
+            except
+            select
+                __TARGET_EXCEPT_COLUMNS__
         )
-    return "\n\n".join(checks)
+    );
+
+insert into {table_names.current_table} (
+    __SOURCE_COLUMNS__
+  , [Row insert datetime]
+  , [Row update datetime]
+  , [Row delete datetime]
+)
+select
+    __UPSERT_SELECT_COLUMNS__
+  , @weaver_load_datetime
+  , @weaver_load_datetime
+  , convert(datetime2(6), '9999-12-31 00:00:00')
+from {table_names.upsert_table} as u
+where u.[_Is new row] = 1;
+
+begin try
+    insert into {table_names.history_table} (
+        __HISTORY_COLUMNS__
+    )
+    select
+        __HISTORY_SELECT_COLUMNS__
+    from {table_names.current_table} as c
+    inner join {table_names.upsert_table} as u on {current_upsert_join}
+    where u.[_Is new row] = 0;
+
+    update c
+    set
+        __UPDATE_SET_COLUMNS__
+    from {table_names.current_table} as c
+    inner join {table_names.upsert_table} as u on {current_upsert_join}
+    where u.[_Is new row] = 0;
+end try
+begin catch
+    delete h
+    from {table_names.history_table} as h
+    inner join {table_names.upsert_table} as u on {history_upsert_join}
+    where u.[_Is new row] = 0
+        and h.[Row delete datetime] = @weaver_load_datetime;
+
+    throw;
+end catch;
+
+begin try
+    insert into {table_names.history_table} (
+        __HISTORY_COLUMNS__
+    )
+    select
+        __HISTORY_SELECT_COLUMNS__
+    from {table_names.current_table} as c
+    where {delete_missing_filter};
+
+    delete c
+    from {table_names.current_table} as c
+    where {delete_missing_filter};
+end try
+begin catch
+    delete h
+    from {table_names.history_table} as h
+    where h.[Row delete datetime] = @weaver_load_datetime
+        and {delete_history_unwind_filter};
+
+    throw;
+end catch;"""
 
 
 def _render_primary_key_name_values(primary_key_columns: list[str]) -> str:
-    return ",\n".join(
-        f"        {_sql_string_literal(column_name.lower())}"
-        for column_name in primary_key_columns
+    return _join_leading_comma_list(
+        [_sql_string_literal(column_name.lower()) for column_name in primary_key_columns],
+        first_indent="            ",
+        comma_indent="          ",
     )
 
 
 def _pk_join_predicate(left_alias: str, right_alias: str, columns: list[str]) -> str:
-    return " AND ".join(
+    predicates = [
         f"{left_alias}.{_quote_identifier_part(column)} = {right_alias}.{_quote_identifier_part(column)}"
         for column in columns
-    )
+    ]
+    if not predicates:
+        return ""
+    return "\n    and ".join(predicates)
 
 
 def _indent_sql(sql_text: str, spaces: int) -> str:
@@ -843,187 +699,200 @@ def _render_infer_create_sql(
 ) -> str:
     table_names = _derive_table_names(target_table_name)
     primary_key_columns = _normalise_column_list(primary_key_columns)
-    identity_type = mapping.get("identity_type", "bigint IDENTITY NOT NULL")
+    identity_type = mapping.get("identity_type", "bigint identity not null")
     history_identity_type = _history_identity_type(identity_type)
     identity_literal = (
-        "NULL" if identity_column is None else _sql_string_literal(identity_column)
+        "null" if identity_column is None else _sql_string_literal(identity_column)
     )
     type_case = _render_type_mapping_case(mapping)
     temp_object_literal = _sql_string_literal(f"tempdb..{temp_table_name}")
     primary_key_columns_cte = _render_primary_key_columns_cte(primary_key_columns)
 
-    return f"""DECLARE @weaver_identity_column varchar(128) = {identity_literal};
-DECLARE @weaver_current_create_sql nvarchar(max);
-DECLARE @weaver_history_create_sql nvarchar(max);
-DECLARE @weaver_current_pk_sql nvarchar(max);
-DECLARE @weaver_view_sql nvarchar(max);
+    return f"""declare @weaver_identity_column varchar(128) = {identity_literal};
+declare @weaver_current_create_sql nvarchar(max);
+declare @weaver_history_create_sql nvarchar(max);
+declare @weaver_current_pk_sql nvarchar(max);
+declare @weaver_view_sql nvarchar(max);
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM tempdb.sys.columns AS c
-    WHERE c.[object_id] = OBJECT_ID({temp_object_literal})
+if not exists (
+    select 1
+    from tempdb.sys.columns as c
+    where c.[object_id] = object_id({temp_object_literal})
 )
-BEGIN
-    THROW 51001, 'Weaver found no temp table columns to create.', 1;
-END;
+begin
+    throw 51001, 'weaver found no temp table columns to create.', 1;
+end;
 
-;WITH primary_key_columns AS (
+;with primary_key_columns as (
 {primary_key_columns_cte}
 ),
-raw_described AS (
-    SELECT
-        c.column_id AS column_ordinal,
-        COALESCE(NULLIF(c.name, ''), CONCAT('Column', c.column_id)) AS column_name,
-        t.name AS system_type_name,
+raw_described as (
+    select
+        c.column_id as column_ordinal,
+        coalesce(nullif(c.name, ''), concat('Column', c.column_id)) as column_name,
+        t.name as system_type_name,
         c.max_length,
         c.precision,
         c.scale,
         c.is_nullable
-    FROM tempdb.sys.columns AS c
-    INNER JOIN tempdb.sys.types AS t
-        ON t.user_type_id = c.user_type_id
-    WHERE c.[object_id] = OBJECT_ID({temp_object_literal})
+    from tempdb.sys.columns as c
+    inner join tempdb.sys.types as t on t.user_type_id = c.user_type_id
+    where c.[object_id] = object_id({temp_object_literal})
 ),
-described AS (
-    SELECT
+described as (
+    select
         column_ordinal,
-        CASE
-            WHEN COUNT(*) OVER (PARTITION BY column_name) = 1 THEN column_name
-            ELSE CONCAT(
+        case
+            when count(*) over (partition by column_name) = 1 then column_name
+            else concat(
                 column_name,
                 '_',
-                ROW_NUMBER() OVER (PARTITION BY column_name ORDER BY column_ordinal)
+                row_number() over (partition by column_name order by column_ordinal)
             )
-        END AS column_name,
+        end as column_name,
         system_type_name,
         max_length,
         precision,
         scale,
         is_nullable
-    FROM raw_described
+    from raw_described
 ),
-mapped AS (
-    SELECT
+mapped as (
+    select
         d.column_ordinal,
-        QUOTENAME(d.column_name) AS quoted_column_name,
-        {type_case} AS warehouse_type,
-        CASE
-            WHEN pk.column_name IS NOT NULL OR d.is_nullable = 0 THEN N' NOT NULL'
-            ELSE N' NULL'
-        END AS nullability
-    FROM described AS d
-    LEFT JOIN primary_key_columns AS pk
-        ON LOWER(pk.column_name) = LOWER(d.column_name)
-    CROSS APPLY (
-        SELECT
-            LOWER(d.system_type_name) AS base_type
-    ) AS bt
+        quotename(d.column_name) as quoted_column_name,
+        {type_case} as warehouse_type,
+        case
+            when pk.column_name is not null or d.is_nullable = 0 then N' not null'
+            else N' null'
+        end as nullability
+    from described as d
+    left join primary_key_columns as pk on lower(pk.column_name) = lower(d.column_name)
+    cross apply (
+        select
+            lower(d.system_type_name) as base_type
+    ) as bt
 ),
-source_column_definitions AS (
-    SELECT
-        column_ordinal + CASE WHEN @weaver_identity_column IS NULL THEN 0 ELSE 1 END AS column_ordinal,
+source_column_definitions as (
+    select
+        column_ordinal + case when @weaver_identity_column is null then 0 else 1 end as column_ordinal,
         quoted_column_name,
-        quoted_column_name + N' ' + warehouse_type + nullability AS current_column_definition,
-        quoted_column_name + N' ' + warehouse_type + nullability AS history_column_definition,
-        quoted_column_name AS view_column
-    FROM mapped
+        quoted_column_name + N' ' + warehouse_type + nullability as current_column_definition,
+        quoted_column_name + N' ' + warehouse_type + nullability as history_column_definition,
+        quoted_column_name as view_column
+    from mapped
 ),
-all_columns AS (
-    SELECT
-        1 AS column_ordinal,
-        QUOTENAME(@weaver_identity_column) AS quoted_column_name,
-        QUOTENAME(@weaver_identity_column) + N' {identity_type}' AS current_column_definition,
-        QUOTENAME(@weaver_identity_column) + N' {history_identity_type}' AS history_column_definition,
-        QUOTENAME(@weaver_identity_column) AS view_column
-    WHERE @weaver_identity_column IS NOT NULL
+all_columns as (
+    select
+        1 as column_ordinal,
+        quotename(@weaver_identity_column) as quoted_column_name,
+        quotename(@weaver_identity_column) + N' {identity_type}' as current_column_definition,
+        quotename(@weaver_identity_column) + N' {history_identity_type}' as history_column_definition,
+        quotename(@weaver_identity_column) as view_column
+    where @weaver_identity_column is not null
 
-    UNION ALL
+    union all
 
-    SELECT
+    select
         column_ordinal,
         quoted_column_name,
         current_column_definition,
         history_column_definition,
         view_column
-    FROM source_column_definitions
+    from source_column_definitions
 
-    UNION ALL
+    union all
 
-    SELECT
+    select
         1000001,
         N'[Row insert datetime]',
-        N'[Row insert datetime] datetime2(6) NULL',
-        N'[Row insert datetime] datetime2(6) NULL',
+        N'[Row insert datetime] datetime2(6) null',
+        N'[Row insert datetime] datetime2(6) null',
         N'[Row insert datetime]'
 
-    UNION ALL
+    union all
 
-    SELECT
+    select
         1000002,
         N'[Row update datetime]',
-        N'[Row update datetime] datetime2(6) NULL',
-        N'[Row update datetime] datetime2(6) NULL',
+        N'[Row update datetime] datetime2(6) null',
+        N'[Row update datetime] datetime2(6) null',
         N'[Row update datetime]'
 
-    UNION ALL
+    union all
 
-    SELECT
+    select
         1000003,
         N'[Row delete datetime]',
-        N'[Row delete datetime] datetime2(6) NOT NULL',
-        N'[Row delete datetime] datetime2(6) NOT NULL',
-        NULL
+        N'[Row delete datetime] datetime2(6) not null',
+        N'[Row delete datetime] datetime2(6) not null',
+        null
 )
-SELECT
+select
     @weaver_current_create_sql = (
-        SELECT
-            N'CREATE TABLE {table_names.current_table} (' + CHAR(10)
-            + STRING_AGG(N'    ' + current_column_definition, N',' + CHAR(10))
-                WITHIN GROUP (ORDER BY column_ordinal)
-            + CHAR(10) + N');'
-        FROM all_columns
+        select
+            N'create table {table_names.current_table} (' + char(10)
+            + string_agg(
+                case
+                    when column_ordinal = 1 then N'    ' + current_column_definition
+                    else N'  , ' + current_column_definition
+                end,
+                char(10)
+            ) within group (order by column_ordinal)
+            + char(10) + N');'
+        from all_columns
     ),
     @weaver_history_create_sql = (
-        SELECT
-            N'CREATE TABLE {table_names.history_table} (' + CHAR(10)
-            + STRING_AGG(N'    ' + history_column_definition, N',' + CHAR(10))
-                WITHIN GROUP (ORDER BY column_ordinal)
-            + CHAR(10) + N');'
-        FROM all_columns
+        select
+            N'create table {table_names.history_table} (' + char(10)
+            + string_agg(
+                case
+                    when column_ordinal = 1 then N'    ' + history_column_definition
+                    else N'  , ' + history_column_definition
+                end,
+                char(10)
+            ) within group (order by column_ordinal)
+            + char(10) + N');'
+        from all_columns
     ),
     @weaver_view_sql = (
-        SELECT
-            N'CREATE OR ALTER VIEW {table_names.view_name} AS' + CHAR(10)
-            + N'SELECT' + CHAR(10)
-            + STRING_AGG(N'    ' + view_column, N',' + CHAR(10))
-                WITHIN GROUP (ORDER BY column_ordinal)
-            + CHAR(10) + N'FROM {table_names.current_table};'
-        FROM all_columns
-        WHERE view_column IS NOT NULL
+        select
+            N'create or alter view {table_names.view_name} as' + char(10)
+            + N'select' + char(10)
+            + string_agg(
+                case
+                    when column_ordinal = 1 then N'    ' + view_column
+                    else N'  , ' + view_column
+                end,
+                char(10)
+            ) within group (order by column_ordinal)
+            + char(10) + N'from {table_names.current_table};'
+        from all_columns
+        where view_column is not null
     ),
     @weaver_current_pk_sql = (
-        SELECT
-            N'ALTER TABLE {table_names.current_table} ADD CONSTRAINT {table_names.current_pk_constraint} '
-            + N'PRIMARY KEY NONCLUSTERED ('
-            + STRING_AGG(QUOTENAME(column_name), N', ') WITHIN GROUP (ORDER BY column_ordinal)
-            + N') NOT ENFORCED;'
-        FROM primary_key_columns
+        select
+            N'alter table {table_names.current_table} add constraint {table_names.current_pk_constraint} '
+            + N'primary key nonclustered ('
+            + string_agg(quotename(column_name), N', ') within group (order by column_ordinal)
+            + N') not enforced;'
+        from primary_key_columns
     );
 
-PRINT @weaver_current_create_sql;
-EXEC sys.sp_executesql @weaver_current_create_sql;
+print @weaver_current_create_sql;
+exec sys.sp_executesql @weaver_current_create_sql;
 
-PRINT @weaver_history_create_sql;
-EXEC sys.sp_executesql @weaver_history_create_sql;
+print @weaver_history_create_sql;
+exec sys.sp_executesql @weaver_history_create_sql;
 
-IF @weaver_current_pk_sql IS NOT NULL
-BEGIN
-    PRINT @weaver_current_pk_sql;
-    EXEC sys.sp_executesql @weaver_current_pk_sql;
-END;
+if @weaver_current_pk_sql is not null
+begin
+    print @weaver_current_pk_sql;
+    exec sys.sp_executesql @weaver_current_pk_sql;
+end;
 
-PRINT @weaver_view_sql;
-EXEC sys.sp_executesql @weaver_view_sql;"""
+print @weaver_view_sql;
+exec sys.sp_executesql @weaver_view_sql;"""
 
 
 def _disambiguate_column_names(column_names: list[str]) -> list[str]:
@@ -1096,12 +965,12 @@ def _metadata_length(row: dict, base_type: str, value: str | int) -> str:
 def _render_type_mapping_case(mapping: dict) -> str:
     fallback = mapping.get("fallback_type", "varchar(max)")
     mappings = mapping.get("mappings", {})
-    lines = ["CASE bt.base_type"]
+    lines = ["case bt.base_type"]
     for source_type in sorted(mappings):
         expression = _render_target_type_expression(source_type, mappings[source_type])
-        lines.append(f"            WHEN '{source_type.lower()}' THEN {expression}")
-    lines.append(f"            ELSE N'{_escape_sql_literal(fallback)}'")
-    lines.append("        END")
+        lines.append(f"            when '{source_type.lower()}' then {expression}")
+    lines.append(f"            else N'{_escape_sql_literal(fallback)}'")
+    lines.append("        end")
     return "\n        ".join(lines)
 
 
@@ -1127,8 +996,8 @@ def _numeric_type_part_expression(value: str | int, column_name: str) -> str:
     if value == "source":
         default_value = "38" if column_name == "precision" else "0"
         return (
-            f"CONVERT(nvarchar(20), "
-            f"COALESCE(NULLIF(CONVERT(int, d.{column_name}), 0), {default_value}))"
+            f"convert(nvarchar(20), "
+            f"coalesce(nullif(convert(int, d.{column_name}), 0), {default_value}))"
         )
     return f"N'{value}'"
 
@@ -1136,13 +1005,13 @@ def _numeric_type_part_expression(value: str | int, column_name: str) -> str:
 def _scale_expression(value: str | int) -> str:
     if value == "min_source_6":
         return (
-            "CONVERT(nvarchar(20), "
-            "CASE "
-            "WHEN d.scale IS NULL THEN 6 "
-            "WHEN CONVERT(int, d.scale) > 6 THEN 6 "
-            "WHEN CONVERT(int, d.scale) < 0 THEN 0 "
-            "ELSE CONVERT(int, d.scale) "
-            "END)"
+            "convert(nvarchar(20), "
+            "case "
+            "when d.scale is null then 6 "
+            "when convert(int, d.scale) > 6 then 6 "
+            "when convert(int, d.scale) < 0 then 0 "
+            "else convert(int, d.scale) "
+            "end)"
         )
     return f"N'{value}'"
 
@@ -1152,13 +1021,13 @@ def _length_expression(source_type: str, value: str | int) -> str:
         return "N'max'"
     if value == "source":
         divisor = "2" if source_type.lower() in {"nchar", "nvarchar"} else "1"
-        source_length = f"CONVERT(int, d.max_length) / {divisor}"
+        source_length = f"convert(int, d.max_length) / {divisor}"
         return (
-            "CASE "
-            "WHEN d.max_length = -1 THEN N'max' "
-            "WHEN d.max_length IS NULL OR d.max_length = 0 THEN N'1' "
-            f"ELSE CONVERT(nvarchar(20), CASE WHEN {source_length} < 1 THEN 1 ELSE {source_length} END) "
-            "END"
+            "case "
+            "when d.max_length = -1 then N'max' "
+            "when d.max_length is null or d.max_length = 0 then N'1' "
+            f"else convert(nvarchar(20), case when {source_length} < 1 then 1 else {source_length} end) "
+            "end"
         )
     return f"N'{value}'"
 
