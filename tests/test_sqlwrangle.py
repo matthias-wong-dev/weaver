@@ -4,7 +4,13 @@ import pytest
 import sqlparse
 from sqlparse import tokens as T
 
-from source.sqlwrangle import insert_ctas, insert_select_into, insert_where_one_eq_zero
+from source.sqlwrangle import (
+    get_sql_template,
+    insert_ctas,
+    insert_select_into,
+    insert_where_one_eq_zero,
+    render_sql_template,
+)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "sql"
@@ -21,6 +27,31 @@ def _select_count(sql):
         for token in statement.flatten()
         if token.ttype is T.DML and token.normalized.upper() == "SELECT"
     )
+
+
+def test_get_sql_template_fetches_wipe_template():
+    template = get_sql_template("admin/wipe")
+
+    assert "from sys.foreign_keys as fk" in template
+    assert "drop constraint" in template
+    assert "from sys.views" in template
+    assert "from sys.tables" in template
+    assert "from sys.schemas" in template
+    assert "exec sys.sp_executesql @weaver_sql;" in template
+    assert "N'information_schema'" in template
+
+
+def test_render_sql_template_populates_named_values():
+    assert render_sql_template(
+        "etl/full_refresh_body",
+        current_table="[dbo].[Target]",
+        staging_table="[dbo].[Staging]",
+    ).startswith("delete from [dbo].[Target];")
+
+
+def test_get_sql_template_blocks_path_traversal():
+    with pytest.raises(ValueError, match="template_name"):
+        get_sql_template("../requirements")
 
 
 @pytest.mark.parametrize(

@@ -9,8 +9,8 @@ import uuid
 
 import yaml
 
+from source.seshelper import SesMetadata, SesSqlDocument
 from source.sqlwrangle import insert_select_into, insert_where_one_eq_zero
-from source.sqlwrangle import insert_ctas
 
 
 DEFAULT_TYPE_MAPPING_PATH = (
@@ -25,6 +25,7 @@ class _TableNames:
     history_table: str
     staging_table: str
     upsert_table: str
+    reject_table: str
     load_procedure: str
     current_pk_constraint: str
 
@@ -37,8 +38,8 @@ def wrap_create_or_alter_view(sql_text: str, view_name: str) -> str:
 
 
 def generate_infer_create_table_sql(
-    sql_text: str,
-    target_table_name: str,
+    sql_text: str | SesSqlDocument,
+    target_table_name: str | SesMetadata | None = None,
     *,
     identity_column: str | None = None,
     primary_key_columns: list[str] | None = None,
@@ -46,6 +47,15 @@ def generate_infer_create_table_sql(
     type_mapping_path: str | Path | None = None,
 ) -> str:
     """Generate a self-contained SQL script that infers and creates a table."""
+
+    sql_text, target_table_name, metadata = _coerce_table_generator_inputs(
+        sql_text,
+        target_table_name,
+        identity_column=identity_column,
+        primary_key_columns=primary_key_columns,
+    )
+    identity_column = identity_column if metadata is None else metadata.identity
+    primary_key_columns = primary_key_columns if metadata is None else list(metadata.primary_key)
 
     mapping = _load_type_mapping(type_mapping_path)
     temp_table_name = _normalise_temp_table_name(temp_table_name)
@@ -58,6 +68,7 @@ def generate_infer_create_table_sql(
         target_table_name=target_table_name,
         identity_column=identity_column,
         primary_key_columns=primary_key_columns,
+        metadata=metadata,
         mapping=mapping,
     )
     return (
@@ -70,15 +81,55 @@ def generate_infer_create_table_sql(
     )
 
 
+def _coerce_table_generator_inputs(
+    sql_text: str | SesSqlDocument,
+    target_table_name: str | SesMetadata | None,
+    *,
+    identity_column: str | None,
+    primary_key_columns: list[str] | None,
+) -> tuple[str, str, SesMetadata | None]:
+    if isinstance(sql_text, SesSqlDocument):
+        metadata = sql_text.metadata
+        _require_table_metadata(metadata)
+        if target_table_name is not None:
+            raise ValueError(
+                "target_table_name must not be supplied when using SesSqlDocument"
+            )
+        return sql_text.sql_text, metadata.qualified_name, metadata
+
+    if isinstance(target_table_name, SesMetadata):
+        metadata = target_table_name
+        _require_table_metadata(metadata)
+        return sql_text, metadata.qualified_name, metadata
+
+    if target_table_name is None:
+        raise ValueError(
+            "target_table_name is required unless sql_text is a SesSqlDocument"
+        )
+    return sql_text, target_table_name, None
+
+
+def _require_table_metadata(metadata: SesMetadata) -> None:
+    if not metadata.is_table:
+        raise ValueError("SES metadata must use Table ID to generate table DDL")
+
+
 def build_create_table_sql_from_describe_rows(
     describe_rows: list[dict],
-    target_table_name: str,
+    target_table_name: str | SesMetadata,
     *,
     identity_column: str | None = None,
     primary_key_columns: list[str] | None = None,
     type_mapping_path: str | Path | None = None,
 ) -> str:
     """Build Fabric table/view DDL from described result-set rows."""
+
+    metadata = target_table_name if isinstance(target_table_name, SesMetadata) else None
+    if metadata is not None:
+        _require_table_metadata(metadata)
+        target_table_name = metadata.qualified_name
+        identity_column = metadata.identity
+        primary_key_columns = list(metadata.primary_key)
 
     mapping = _load_type_mapping(type_mapping_path)
     table_names = _derive_table_names(target_table_name)
@@ -105,6 +156,8 @@ def build_create_table_sql_from_describe_rows(
             for row in visible_rows
         ]
     )
+    if metadata is not None:
+        _validate_metadata_columns_exist(metadata, names)
 
     current_column_definitions: list[str] = []
     history_column_definitions: list[str] = []
@@ -139,87 +192,6 @@ def build_create_table_sql_from_describe_rows(
         history_column_definitions=history_column_definitions,
         view_columns=view_columns,
         primary_key_columns=primary_key_columns,
-    )
-
-
-def generate_load_stored_procedure_sql(
-    sql_text: str,
-    target_table_name: str,
-    *,
-    primary_key_columns: list[str] | None = None,
-) -> str:
-    """Generate SQL that creates a static ETL stored procedure."""
-
-    table_names = _derive_table_names(target_table_name)
-    primary_key_columns = _normalise_column_list(primary_key_columns)
-    source_sql = _normalise_procedure_source_sql(sql_text)
-    runtime_staging_sql = _ensure_statement_terminated(
-        insert_ctas(source_sql, table_names.staging_table)
-    )
-
-    procedure_template = _render_static_load_procedure_template(
-        table_names=table_names,
-        runtime_staging_sql=runtime_staging_sql,
-        primary_key_columns=primary_key_columns,
-    )
-
-    return (
-        "/* weaver generated etl procedure installer. */\n"
-        "set nocount on;\n\n"
-        "if schema_id(N'_') is null exec(N'create schema [_]');\n\n"
-        "declare @weaver_proc_sql nvarchar(max);\n"
-        "declare @weaver_source_columns nvarchar(max);\n"
-        "declare @weaver_staging_select_columns nvarchar(max);\n"
-        "declare @weaver_staging_except_columns nvarchar(max);\n"
-        "declare @weaver_upsert_select_columns nvarchar(max);\n"
-        "declare @weaver_target_select_columns nvarchar(max);\n"
-        "declare @weaver_target_except_columns nvarchar(max);\n"
-        "declare @weaver_history_columns nvarchar(max);\n"
-        "declare @weaver_history_select_columns nvarchar(max);\n"
-        "declare @weaver_update_set_columns nvarchar(max);\n\n"
-        f"{_render_installer_column_metadata_sql(table_names, primary_key_columns)}\n\n"
-        f"set @weaver_proc_sql = {_sql_string_literal(procedure_template)};\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__SOURCE_COLUMNS__', @weaver_source_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__STAGING_SELECT_COLUMNS__', @weaver_staging_select_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__STAGING_EXCEPT_COLUMNS__', @weaver_staging_except_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__UPSERT_SELECT_COLUMNS__', @weaver_upsert_select_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__TARGET_SELECT_COLUMNS__', @weaver_target_select_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__TARGET_EXCEPT_COLUMNS__', @weaver_target_except_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__HISTORY_COLUMNS__', @weaver_history_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__HISTORY_SELECT_COLUMNS__', @weaver_history_select_columns);\n"
-        "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__UPDATE_SET_COLUMNS__', @weaver_update_set_columns);\n\n"
-        "exec sys.sp_executesql @weaver_proc_sql;"
-    )
-
-
-def _render_static_load_procedure_template(
-    *,
-    table_names: _TableNames,
-    runtime_staging_sql: str,
-    primary_key_columns: list[str],
-) -> str:
-    if primary_key_columns:
-        load_body = _render_static_primary_key_load_body(
-            table_names=table_names,
-            primary_key_columns=primary_key_columns,
-        )
-    else:
-        load_body = _render_static_full_refresh_load_body(table_names=table_names)
-
-    return (
-        f"create or alter procedure {table_names.load_procedure}\n"
-        "as\n"
-        "begin\n"
-        "    set nocount on;\n"
-        "    declare @weaver_load_datetime datetime2(6) = sysutcdatetime();\n"
-        "\n"
-        f"    if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
-        f"    if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};\n\n"
-        f"{_indent_sql(runtime_staging_sql, 4)}\n\n"
-        f"{_indent_sql(load_body, 4)}\n\n"
-        f"    if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
-        f"    if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};\n"
-        "end;"
     )
 
 
@@ -276,6 +248,7 @@ def _derive_table_names(target_table_name: str) -> _TableNames:
         history_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_History')}",
         staging_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Staging')}",
         upsert_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Upsert')}",
+        reject_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Reject')}",
         load_procedure=f"[_].{_quote_identifier_part(f'ETL {schema_name}.{unquoted_table_name}')}",
         current_pk_constraint=_quote_identifier_part(f"PK_{unquoted_table_name}_Current"),
     )
@@ -429,264 +402,113 @@ def _render_primary_key_columns_cte(primary_key_columns: list[str]) -> str:
     )
 
 
-def _render_installer_column_metadata_sql(
-    table_names: _TableNames,
-    primary_key_columns: list[str],
-) -> str:
-    primary_key_values = _render_primary_key_name_values(primary_key_columns)
-    source_column_filter = (
-        "c.name not in (N'Row insert datetime', N'Row update datetime', N'Row delete datetime')\n"
-        "        and c.is_identity = 0"
-    )
-    primary_key_filter = (
-        f"and lower(c.name) not in (\n{primary_key_values}\n        )"
-        if primary_key_columns
-        else ""
-    )
-    update_select = (
-        ";with update_columns as (\n"
-        "    select\n"
-        "        c.name\n"
-        "      , c.column_id\n"
-        "      , row_number() over (order by c.column_id) as row_ordinal\n"
-        "    from sys.columns as c\n"
-        f"    where c.[object_id] = object_id({_sql_string_literal(table_names.current_table)})\n"
-        f"        and {source_column_filter}\n"
-        f"        {primary_key_filter}\n"
-        ")\n"
-        "select\n"
-        "    @weaver_update_set_columns =\n"
-        "        coalesce(\n"
-        "            string_agg(\n"
-        "                case\n"
-        "                    when row_ordinal = 1 then N'c.' + quotename(name) + N' = u.' + quotename(name)\n"
-        "                    else char(10) + N'          , c.' + quotename(name) + N' = u.' + quotename(name)\n"
-        "                end,\n"
-        "                N''\n"
-        "            ) within group (order by column_id)\n"
-        "            + char(10) + N'          , ',\n"
-        "            N''\n"
-        "        )\n"
-        "        + N'c.[Row update datetime] = @weaver_load_datetime'\n"
-        "        + char(10) + N'          , c.[Row delete datetime] = convert(datetime2(6), ''9999-12-31 00:00:00'')'\n"
-        "from update_columns;"
-        if primary_key_columns
-        else "set @weaver_update_set_columns = N'';"
-    )
-
-    return f""";with source_columns as (
-    select
-        c.name
-      , c.column_id
-      , row_number() over (order by c.column_id) as row_ordinal
-    from sys.columns as c
-    where c.[object_id] = object_id({_sql_string_literal(table_names.current_table)})
-        and {source_column_filter}
-)
-select
-    @weaver_source_columns = string_agg(
-        case when row_ordinal = 1 then quotename(name) else char(10) + N'      , ' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_staging_select_columns = string_agg(
-        case when row_ordinal = 1 then N's.' + quotename(name) else char(10) + N'      , s.' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_staging_except_columns = string_agg(
-        case when row_ordinal = 1 then N's.' + quotename(name) else char(10) + N'                  , s.' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_upsert_select_columns = string_agg(
-        case when row_ordinal = 1 then N'u.' + quotename(name) else char(10) + N'      , u.' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_target_select_columns = string_agg(
-        case when row_ordinal = 1 then N't.' + quotename(name) else char(10) + N'      , t.' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_target_except_columns = string_agg(
-        case when row_ordinal = 1 then N't.' + quotename(name) else char(10) + N'                  , t.' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-from source_columns;
-
-;with history_columns as (
-    select
-        c.name
-      , c.column_id
-      , row_number() over (order by c.column_id) as row_ordinal
-    from sys.columns as c
-    where c.[object_id] = object_id({_sql_string_literal(table_names.history_table)})
-)
-select
-    @weaver_history_columns = string_agg(
-        case when row_ordinal = 1 then quotename(name) else char(10) + N'          , ' + quotename(name) end,
-        N''
-    ) within group (order by column_id)
-  , @weaver_history_select_columns = string_agg(
-        case
-            when name = N'Row delete datetime' and row_ordinal = 1 then N'@weaver_load_datetime as ' + quotename(name)
-            when name = N'Row delete datetime' then char(10) + N'          , @weaver_load_datetime as ' + quotename(name)
-            when row_ordinal = 1 then N'c.' + quotename(name)
-            else char(10) + N'          , c.' + quotename(name)
-        end,
-        N''
-    ) within group (order by column_id)
-from history_columns;
-
-{update_select}
-
-if @weaver_source_columns is null
-begin
-    throw 51002, 'weaver current table has no source columns to load.', 1;
-end;
-
-if @weaver_history_columns is null
-begin
-    throw 51003, 'weaver history table does not exist or has no columns.', 1;
-end;"""
+def _metadata_referenced_columns(metadata: SesMetadata) -> list[tuple[str, str]]:
+    columns: list[tuple[str, str]] = []
+    columns.extend(("Primary key", column) for column in metadata.primary_key)
+    for unique_key in metadata.unique_keys:
+        columns.extend(("Unique key", column) for column in unique_key)
+    for foreign_key in metadata.foreign_keys:
+        columns.extend(("Foreign key", column) for column in foreign_key.child_columns)
+    columns.extend(("Column notes", column) for column in metadata.column_notes)
+    return columns
 
 
-def _render_static_full_refresh_load_body(*, table_names: _TableNames) -> str:
-    return f"""delete from {table_names.current_table};
+def _validate_metadata_columns_exist(
+    metadata: SesMetadata,
+    column_names: list[str],
+) -> None:
+    available_columns = {column_name.lower() for column_name in column_names}
+    if metadata.identity:
+        available_columns.add(metadata.identity.lower())
 
-insert into {table_names.current_table} (
-    __SOURCE_COLUMNS__
-  , [Row insert datetime]
-  , [Row update datetime]
-  , [Row delete datetime]
-)
-select
-    __STAGING_SELECT_COLUMNS__
-  , @weaver_load_datetime
-  , @weaver_load_datetime
-  , convert(datetime2(6), '9999-12-31 00:00:00')
-from {table_names.staging_table} as s;"""
-
-
-def _render_static_primary_key_load_body(
-    *,
-    table_names: _TableNames,
-    primary_key_columns: list[str],
-) -> str:
-    staging_target_join = _pk_join_predicate("s", "t", primary_key_columns)
-    current_upsert_join = _pk_join_predicate("c", "u", primary_key_columns)
-    history_upsert_join = _pk_join_predicate("h", "u", primary_key_columns)
-    staging_current_join = _pk_join_predicate("s", "c", primary_key_columns)
-    staging_history_join = _pk_join_predicate("s", "h", primary_key_columns)
-    target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} is null"
-    delete_missing_filter = (
-        f"not exists (select 1 from {table_names.staging_table} as s "
-        f"where {staging_current_join})"
-    )
-    delete_history_unwind_filter = (
-        f"not exists (select 1 from {table_names.staging_table} as s "
-        f"where {staging_history_join})"
-    )
-
-    return f"""create table {table_names.upsert_table} as
-select
-    __STAGING_SELECT_COLUMNS__
-  , case when {target_missing_predicate} then cast(1 as int) else cast(0 as int) end as [_Is new row]
-from {table_names.staging_table} as s
-left join {table_names.view_name} as t on {staging_target_join}
-where
-    (
-        {target_missing_predicate}
-        or exists (
-            select
-                __STAGING_EXCEPT_COLUMNS__
-            except
-            select
-                __TARGET_EXCEPT_COLUMNS__
-        )
-    );
-
-insert into {table_names.current_table} (
-    __SOURCE_COLUMNS__
-  , [Row insert datetime]
-  , [Row update datetime]
-  , [Row delete datetime]
-)
-select
-    __UPSERT_SELECT_COLUMNS__
-  , @weaver_load_datetime
-  , @weaver_load_datetime
-  , convert(datetime2(6), '9999-12-31 00:00:00')
-from {table_names.upsert_table} as u
-where u.[_Is new row] = 1;
-
-begin try
-    insert into {table_names.history_table} (
-        __HISTORY_COLUMNS__
-    )
-    select
-        __HISTORY_SELECT_COLUMNS__
-    from {table_names.current_table} as c
-    inner join {table_names.upsert_table} as u on {current_upsert_join}
-    where u.[_Is new row] = 0;
-
-    update c
-    set
-        __UPDATE_SET_COLUMNS__
-    from {table_names.current_table} as c
-    inner join {table_names.upsert_table} as u on {current_upsert_join}
-    where u.[_Is new row] = 0;
-end try
-begin catch
-    delete h
-    from {table_names.history_table} as h
-    inner join {table_names.upsert_table} as u on {history_upsert_join}
-    where u.[_Is new row] = 0
-        and h.[Row delete datetime] = @weaver_load_datetime;
-
-    throw;
-end catch;
-
-begin try
-    insert into {table_names.history_table} (
-        __HISTORY_COLUMNS__
-    )
-    select
-        __HISTORY_SELECT_COLUMNS__
-    from {table_names.current_table} as c
-    where {delete_missing_filter};
-
-    delete c
-    from {table_names.current_table} as c
-    where {delete_missing_filter};
-end try
-begin catch
-    delete h
-    from {table_names.history_table} as h
-    where h.[Row delete datetime] = @weaver_load_datetime
-        and {delete_history_unwind_filter};
-
-    throw;
-end catch;"""
-
-
-def _render_primary_key_name_values(primary_key_columns: list[str]) -> str:
-    return _join_leading_comma_list(
-        [_sql_string_literal(column_name.lower()) for column_name in primary_key_columns],
-        first_indent="            ",
-        comma_indent="          ",
-    )
-
-
-def _pk_join_predicate(left_alias: str, right_alias: str, columns: list[str]) -> str:
-    predicates = [
-        f"{left_alias}.{_quote_identifier_part(column)} = {right_alias}.{_quote_identifier_part(column)}"
-        for column in columns
-    ]
-    if not predicates:
-        return ""
-    return "\n    and ".join(predicates)
+    for metadata_kind, column_name in _metadata_referenced_columns(metadata):
+        if column_name.lower() not in available_columns:
+            raise ValueError(f"{metadata_kind} {column_name} does not exist")
 
 
 def _indent_sql(sql_text: str, spaces: int) -> str:
     prefix = " " * spaces
     return "\n".join(f"{prefix}{line}" if line else "" for line in sql_text.splitlines())
+
+
+def _render_metadata_column_validation_sql(
+    *,
+    temp_object_literal: str,
+    metadata: SesMetadata | None,
+) -> str:
+    if metadata is None:
+        return ""
+
+    referenced_columns = _metadata_referenced_columns(metadata)
+    if not referenced_columns:
+        return ""
+
+    metadata_columns_cte = _render_metadata_columns_cte(referenced_columns)
+    return f"""declare @weaver_missing_metadata_column nvarchar(2048);
+
+;with raw_described as (
+    select
+        c.column_id as column_ordinal,
+        coalesce(nullif(c.name, ''), concat('Column', c.column_id)) as column_name
+    from tempdb.sys.columns as c
+    where c.[object_id] = object_id({temp_object_literal})
+),
+described as (
+    select
+        column_ordinal,
+        case
+            when count(*) over (partition by column_name) = 1 then column_name
+            else concat(
+                column_name,
+                '_',
+                row_number() over (partition by column_name order by column_ordinal)
+            )
+        end as column_name
+    from raw_described
+),
+generated_columns as (
+    select
+        column_name
+    from described
+
+    union all
+
+    select
+        @weaver_identity_column
+    where @weaver_identity_column is not null
+),
+metadata_columns as (
+{metadata_columns_cte}
+)
+select top (1)
+    @weaver_missing_metadata_column =
+        concat(metadata_kind, N' ', column_name, N' does not exist')
+from metadata_columns as m
+where not exists (
+    select 1
+    from generated_columns as gc
+    where lower(gc.column_name) = lower(m.column_name)
+)
+order by
+    metadata_kind
+  , column_name;
+
+if @weaver_missing_metadata_column is not null
+begin
+    throw 51004, @weaver_missing_metadata_column, 1;
+end;"""
+
+
+def _render_metadata_columns_cte(referenced_columns: list[tuple[str, str]]) -> str:
+    lines = []
+    for index, (metadata_kind, column_name) in enumerate(referenced_columns):
+        prefix = "    select" if index == 0 else "    union all\n\n    select"
+        lines.append(
+            f"{prefix}\n"
+            f"        {_sql_string_literal(metadata_kind)} as metadata_kind\n"
+            f"      , {_sql_string_literal(column_name)} as column_name"
+        )
+    return "\n".join(lines)
 
 
 def _render_infer_create_sql(
@@ -695,6 +517,7 @@ def _render_infer_create_sql(
     target_table_name: str,
     identity_column: str | None,
     primary_key_columns: list[str] | None,
+    metadata: SesMetadata | None,
     mapping: dict,
 ) -> str:
     table_names = _derive_table_names(target_table_name)
@@ -707,6 +530,10 @@ def _render_infer_create_sql(
     type_case = _render_type_mapping_case(mapping)
     temp_object_literal = _sql_string_literal(f"tempdb..{temp_table_name}")
     primary_key_columns_cte = _render_primary_key_columns_cte(primary_key_columns)
+    metadata_validation_sql = _render_metadata_column_validation_sql(
+        temp_object_literal=temp_object_literal,
+        metadata=metadata,
+    )
 
     return f"""declare @weaver_identity_column varchar(128) = {identity_literal};
 declare @weaver_current_create_sql nvarchar(max);
@@ -722,6 +549,8 @@ if not exists (
 begin
     throw 51001, 'weaver found no temp table columns to create.', 1;
 end;
+
+{metadata_validation_sql}
 
 ;with primary_key_columns as (
 {primary_key_columns_cte}

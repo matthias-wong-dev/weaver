@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from string import Template
 
 import sqlparse
 from sqlparse import tokens as T
+
+
+SQL_TEMPLATE_DIR = Path(__file__).resolve().parent / "sql_templates"
 
 
 _BOUNDARY_KEYWORDS = {
@@ -112,6 +117,31 @@ def insert_select_into(sql_text: str, table_name: str) -> str:
     insert_at = _find_select_into_insert_position(tokens, query_span)
     insert_text = _select_into_text(sql_text, insert_at, table_name)
     return f"{sql_text[:insert_at]}{insert_text}{sql_text[insert_at:]}"
+
+
+def get_sql_template(template_name: str) -> str:
+    """Fetch a SQL template from ``source/sql_templates``."""
+
+    template_path = _sql_template_path(template_name)
+    return template_path.read_text(encoding="utf-8")
+
+
+def render_sql_template(template_name: str, **values: object) -> str:
+    """Fetch and populate a SQL template with ``string.Template`` values."""
+
+    template = Template(get_sql_template(template_name))
+    return template.substitute({key: str(value) for key, value in values.items()})
+
+
+def _sql_template_path(template_name: str) -> Path:
+    normalised_name = template_name if template_name.endswith(".sql") else f"{template_name}.sql"
+    candidate = (SQL_TEMPLATE_DIR / normalised_name).resolve()
+    template_root = SQL_TEMPLATE_DIR.resolve()
+    if template_root not in candidate.parents:
+        raise ValueError("template_name must stay within the SQL template directory")
+    if not candidate.is_file():
+        raise FileNotFoundError(f"SQL template not found: {template_name}")
+    return candidate
 
 
 def _collect_replacements(sql_text: str) -> list[_Replacement]:

@@ -15,8 +15,8 @@ sys.path.insert(0, str(ROOT))
 
 from source.ddlhelper import (  # noqa: E402
     build_create_table_sql_from_describe_rows,
-    generate_load_stored_procedure_sql,
 )
+from source.etlhelper import generate_load_stored_procedure_sql  # noqa: E402
 from source.fabric_sql import run_sql  # noqa: E402
 
 
@@ -40,6 +40,7 @@ def main() -> None:
     cleanup_statements = [
         f"if object_id(N'{proc_name}', N'P') is not null drop procedure {proc_name};",
         f"if object_id(N'[dbo].[{target_base}]', N'V') is not null drop view [dbo].[{target_base}];",
+        f"if object_id(N'[dbo].[{target_base}_Reject]', N'U') is not null drop table [dbo].[{target_base}_Reject];",
         f"if object_id(N'[dbo].[{target_base}_Upsert]', N'U') is not null drop table [dbo].[{target_base}_Upsert];",
         f"if object_id(N'[dbo].[{target_base}_Staging]', N'U') is not null drop table [dbo].[{target_base}_Staging];",
         f"if object_id(N'[dbo].[{target_base}_History]', N'U') is not null drop table [dbo].[{target_base}_History];",

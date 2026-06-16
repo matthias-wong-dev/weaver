@@ -5,16 +5,22 @@ import pytest
 from source.ddlhelper import (
     build_create_table_sql_from_describe_rows,
     generate_infer_create_table_sql,
-    generate_load_stored_procedure_sql,
     wrap_create_or_alter_view,
 )
+from source.etlhelper import generate_load_stored_procedure_sql
+from source.seshelper import parse_ses_sql, read_ses_sql_file
 
 
 FABRIC_SAMPLE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "fabric_sample_sql"
+SES_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ses"
 
 
 def _fabric_sample_fixture_sql(name):
     return (FABRIC_SAMPLE_FIXTURE_DIR / name).read_text()
+
+
+def _ses_fixture(name):
+    return read_ses_sql_file(SES_FIXTURE_DIR / name)
 
 
 def _materialise_installed_procedure(installer_sql, replacements):
@@ -66,6 +72,54 @@ def test_generate_infer_create_table_sql_uses_sample_query_fixtures(fixture_name
     assert "exec sys.sp_executesql @weaver_history_create_sql;" in transformed
     assert "exec sys.sp_executesql @weaver_current_pk_sql;" in transformed
     assert "exec sys.sp_executesql @weaver_view_sql;" in transformed
+
+
+def test_generate_infer_create_table_sql_accepts_ses_document_metadata():
+    document = _ses_fixture("mart.Customer.sql")
+
+    transformed = generate_infer_create_table_sql(
+        document,
+        temp_table_name="#weaver_shape_ses_customer",
+    )
+
+    assert "into #weaver_shape_ses_customer" in transformed
+    assert "create table [mart].[Customer_Current]" in transformed
+    assert "create table [mart].[Customer_History]" in transformed
+    assert "create or alter view [mart].[Customer]" in transformed
+    assert "declare @weaver_identity_column varchar(128) = N'Customer SK';" in transformed
+    assert "(1, N'CustomerCode')" in transformed
+    assert "throw 51004, @weaver_missing_metadata_column, 1;" in transformed
+    assert "N'Primary key' as metadata_kind" in transformed
+    assert "N'Unique key' as metadata_kind" in transformed
+    assert "N'Column notes' as metadata_kind" in transformed
+    assert "concat(metadata_kind, N' ', column_name, N' does not exist')" in transformed
+
+
+def test_generate_infer_create_table_sql_emits_remote_metadata_column_errors():
+    document = parse_ses_sql(
+        """/*
+Table ID: mart.Customer
+Description: Customer table.
+Primary key: MissingPK
+Unique keys:
+    - MissingUQ
+Revisions:
+    - 2026-06-16 Initial table.
+Column notes:
+    MissingNote: This column is not in the query.
+*/\nselect CustomerCode from dbo.SourceCustomers"""
+    )
+
+    transformed = generate_infer_create_table_sql(
+        document,
+        temp_table_name="#weaver_shape_ses_missing_columns",
+    )
+
+    assert "N'Primary key' as metadata_kind\n      , N'MissingPK' as column_name" in transformed
+    assert "N'Unique key' as metadata_kind\n      , N'MissingUQ' as column_name" in transformed
+    assert "N'Column notes' as metadata_kind\n      , N'MissingNote' as column_name" in transformed
+    assert "concat(metadata_kind, N' ', column_name, N' does not exist')" in transformed
+    assert "throw 51004, @weaver_missing_metadata_column, 1;" in transformed
 
 
 def test_generate_infer_create_table_sql_contains_yaml_type_mappings():
@@ -196,6 +250,85 @@ def test_build_create_table_sql_from_describe_rows_maps_fabric_types():
     )
 
 
+def test_build_create_table_sql_from_describe_rows_accepts_ses_metadata():
+    metadata = _ses_fixture("mart.Customer.sql").metadata
+    rows = [
+        {
+            "is_hidden": False,
+            "column_ordinal": 1,
+            "name": "CustomerCode",
+            "is_nullable": True,
+            "system_type_name": "varchar(20)",
+            "max_length": 20,
+            "precision": 0,
+            "scale": 0,
+            "error_number": None,
+        },
+        {
+            "is_hidden": False,
+            "column_ordinal": 2,
+            "name": "CustomerName",
+            "is_nullable": True,
+            "system_type_name": "varchar(80)",
+            "max_length": 80,
+            "precision": 0,
+            "scale": 0,
+            "error_number": None,
+        },
+        {
+            "is_hidden": False,
+            "column_ordinal": 3,
+            "name": "CustomerSegment",
+            "is_nullable": True,
+            "system_type_name": "varchar(40)",
+            "max_length": 40,
+            "precision": 0,
+            "scale": 0,
+            "error_number": None,
+        },
+    ]
+
+    create_sql = build_create_table_sql_from_describe_rows(rows, metadata)
+
+    assert "create table [mart].[Customer_Current]" in create_sql
+    assert "[Customer SK] bigint identity not null" in create_sql
+    assert "[CustomerCode] varchar(20) not null" in create_sql
+    assert (
+        "alter table [mart].[Customer_Current] add constraint [PK_Customer_Current] "
+        "primary key nonclustered ([CustomerCode]) not enforced;"
+    ) in create_sql
+
+
+def test_build_create_table_sql_from_describe_rows_validates_ses_metadata_columns():
+    metadata = parse_ses_sql(
+        """/*
+Table ID: mart.Customer
+Description: Customer table.
+Primary key: MissingKey
+Revisions:
+    - 2026-06-16 Initial table.
+*/\nselect CustomerCode from dbo.SourceCustomers"""
+    ).metadata
+
+    with pytest.raises(ValueError, match="Primary key MissingKey does not exist"):
+        build_create_table_sql_from_describe_rows(
+            [
+                {
+                    "is_hidden": False,
+                    "column_ordinal": 1,
+                    "name": "CustomerCode",
+                    "is_nullable": True,
+                    "system_type_name": "varchar(20)",
+                    "max_length": 20,
+                    "precision": 0,
+                    "scale": 0,
+                    "error_number": None,
+                },
+            ],
+            metadata,
+        )
+
+
 def test_build_create_table_sql_from_describe_rows_disambiguates_duplicates():
     rows = [
         {
@@ -303,10 +436,15 @@ def test_generate_load_stored_procedure_sql_builds_pk_incremental_loader():
     assert "set @weaver_proc_sql = N'create or alter procedure [_].[ETL mart.Customer]" in installer_sql
     assert "create table [mart].[Customer_Staging] as" in installer_sql
     assert "create table [mart].[Customer_Upsert] as" in installer_sql
+    assert "create table [mart].[Customer_Reject] as" in installer_sql
     assert "left join [mart].[Customer] as t on s.[CustomerCode] = t.[CustomerCode]" in installer_sql
     assert "or exists (" in installer_sql
     assert "except" in installer_sql
     assert "as [_Is new row]" in installer_sql
+    assert "cast(''null primary key'' as varchar(100))" in installer_sql
+    assert "cast(''duplicate primary key'' as varchar(100))" in installer_sql
+    assert "count(*) over (partition by u.[CustomerCode])" in installer_sql
+    assert "from [mart].[Customer_Reject] as r" in installer_sql
     assert "insert into [mart].[Customer_Current]" in installer_sql
     assert "insert into [mart].[Customer_History]" in installer_sql
     assert "update c" in installer_sql
@@ -316,6 +454,7 @@ def test_generate_load_stored_procedure_sql_builds_pk_incremental_loader():
     assert "c.[Row update datetime] = @weaver_load_datetime" in installer_sql
     assert "when name = N'Row delete datetime' and row_ordinal = 1 then N'@weaver_load_datetime as ' + quotename(name)" in installer_sql
     assert "delete h" in installer_sql
+    assert "if not exists (\n        select 1\n        from [mart].[Customer_Reject]\n    )" in installer_sql
     assert "set @weaver_proc_sql = replace(@weaver_proc_sql, N'__SOURCE_COLUMNS__', @weaver_source_columns);" in installer_sql
 
     assert _materialise_installed_procedure(
@@ -337,6 +476,7 @@ begin
     set nocount on;
     declare @weaver_load_datetime datetime2(6) = sysutcdatetime();
 
+    if object_id(N'[mart].[Customer_Reject]', N'U') is not null drop table [mart].[Customer_Reject];
     if object_id(N'[mart].[Customer_Upsert]', N'U') is not null drop table [mart].[Customer_Upsert];
     if object_id(N'[mart].[Customer_Staging]', N'U') is not null drop table [mart].[Customer_Staging];
 
@@ -364,6 +504,40 @@ begin
                     t.[CustomerCode]
                   , t.[CustomerName]
                   , t.[Balance]
+            )
+        );
+
+    create table [mart].[Customer_Reject] as
+    select
+        u.[CustomerCode]
+      , u.[CustomerName]
+      , u.[Balance]
+      , u.[_Is new row]
+      , case
+            when u.[CustomerCode] is null then cast('null primary key' as varchar(100))
+            when u.[__weaver_pk_count] > 1 then cast('duplicate primary key' as varchar(100))
+        end as [Rejection reason]
+    from (
+        select
+            u.*
+          , count(*) over (partition by u.[CustomerCode]) as [__weaver_pk_count]
+        from [mart].[Customer_Upsert] as u
+    ) as u
+    where
+        (
+            u.[CustomerCode] is null
+            or u.[__weaver_pk_count] > 1
+        );
+
+    delete u
+    from [mart].[Customer_Upsert] as u
+    where
+        (
+            u.[CustomerCode] is null
+            or exists (
+                select 1
+                from [mart].[Customer_Reject] as r
+                where u.[CustomerCode] = r.[CustomerCode]
             )
         );
 
@@ -457,9 +631,72 @@ begin
         throw;
     end catch;
 
-    if object_id(N'[mart].[Customer_Upsert]', N'U') is not null drop table [mart].[Customer_Upsert];
-    if object_id(N'[mart].[Customer_Staging]', N'U') is not null drop table [mart].[Customer_Staging];
+    if not exists (
+        select 1
+        from [mart].[Customer_Reject]
+    )
+    begin
+        if object_id(N'[mart].[Customer_Reject]', N'U') is not null drop table [mart].[Customer_Reject];
+        if object_id(N'[mart].[Customer_Upsert]', N'U') is not null drop table [mart].[Customer_Upsert];
+        if object_id(N'[mart].[Customer_Staging]', N'U') is not null drop table [mart].[Customer_Staging];
+    end;
 end;"""
+
+
+def test_generate_load_stored_procedure_sql_rejects_null_primary_keys():
+    installer_sql = generate_load_stored_procedure_sql(
+        "select CustomerCode, CustomerName, Balance from dbo.SourceCustomers",
+        "mart.Customer",
+        primary_key_columns=["CustomerCode"],
+    )
+
+    assert "create table [mart].[Customer_Reject] as" in installer_sql
+    assert "when u.[CustomerCode] is null then cast(''null primary key'' as varchar(100))" in installer_sql
+    assert (
+        "delete u\n"
+        "    from [mart].[Customer_Upsert] as u\n"
+        "    where\n"
+        "        (\n"
+        "            u.[CustomerCode] is null"
+    ) in installer_sql
+
+
+def test_generate_load_stored_procedure_sql_rejects_duplicate_primary_keys():
+    installer_sql = generate_load_stored_procedure_sql(
+        "select CustomerCode, CustomerName, Balance from dbo.SourceCustomers",
+        "mart.Customer",
+        primary_key_columns=["CustomerCode"],
+    )
+
+    assert "count(*) over (partition by u.[CustomerCode]) as [__weaver_pk_count]" in installer_sql
+    assert "when u.[__weaver_pk_count] > 1 then cast(''duplicate primary key'' as varchar(100))" in installer_sql
+    assert "or u.[__weaver_pk_count] > 1" in installer_sql
+    assert (
+        "or exists (\n"
+        "                select 1\n"
+        "                from [mart].[Customer_Reject] as r\n"
+        "                where u.[CustomerCode] = r.[CustomerCode]"
+    ) in installer_sql
+
+
+def test_generate_load_stored_procedure_sql_keeps_artifacts_when_reject_is_not_empty():
+    installer_sql = generate_load_stored_procedure_sql(
+        "select CustomerCode, CustomerName, Balance from dbo.SourceCustomers",
+        "mart.Customer",
+        primary_key_columns=["CustomerCode"],
+    )
+
+    assert (
+        "if not exists (\n"
+        "        select 1\n"
+        "        from [mart].[Customer_Reject]\n"
+        "    )\n"
+        "    begin\n"
+        "        if object_id(N''[mart].[Customer_Reject]'', N''U'') is not null drop table [mart].[Customer_Reject];\n"
+        "        if object_id(N''[mart].[Customer_Upsert]'', N''U'') is not null drop table [mart].[Customer_Upsert];\n"
+        "        if object_id(N''[mart].[Customer_Staging]'', N''U'') is not null drop table [mart].[Customer_Staging];\n"
+        "    end;"
+    ) in installer_sql
 
 
 def test_generate_load_stored_procedure_sql_builds_full_refresh_without_pk():
@@ -498,6 +735,7 @@ begin
     set nocount on;
     declare @weaver_load_datetime datetime2(6) = sysutcdatetime();
 
+    if object_id(N'[mart].[Product_Reject]', N'U') is not null drop table [mart].[Product_Reject];
     if object_id(N'[mart].[Product_Upsert]', N'U') is not null drop table [mart].[Product_Upsert];
     if object_id(N'[mart].[Product_Staging]', N'U') is not null drop table [mart].[Product_Staging];
 
@@ -521,6 +759,7 @@ begin
       , convert(datetime2(6), '9999-12-31 00:00:00')
     from [mart].[Product_Staging] as s;
 
+    if object_id(N'[mart].[Product_Reject]', N'U') is not null drop table [mart].[Product_Reject];
     if object_id(N'[mart].[Product_Upsert]', N'U') is not null drop table [mart].[Product_Upsert];
     if object_id(N'[mart].[Product_Staging]', N'U') is not null drop table [mart].[Product_Staging];
 end;"""
@@ -538,6 +777,18 @@ def test_generate_load_stored_procedure_sql_quotes_names_and_composite_pk():
     assert (
         "left join [audit].[Order Line] as t on "
         "s.[Order Id] = t.[Order Id]\n        and s.[Line No] = t.[Line No]"
+    ) in installer_sql
+    assert "create table [audit].[Order Line_Reject] as" in installer_sql
+    assert "count(*) over (partition by u.[Order Id], u.[Line No])" in installer_sql
+    assert (
+        "when (\n"
+        "                    u.[Order Id] is null\n"
+        "                    or u.[Line No] is null\n"
+        "                ) then cast(''null primary key'' as varchar(100))"
+    ) in installer_sql
+    assert (
+        "where u.[Order Id] = r.[Order Id]\n"
+        "        and u.[Line No] = r.[Line No]"
     ) in installer_sql
     assert "N'order id'" in installer_sql
     assert "N'line no'" in installer_sql
