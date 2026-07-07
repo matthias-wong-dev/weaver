@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 import uuid
 
 import yaml
 
-from source.seshelper import SesMetadata, SesSqlDocument
-from source.sqlwrangle import insert_select_into, insert_where_one_eq_zero
+from source.seshelper import (
+    SesMetadata,
+    SesRepository,
+    SesSqlDocument,
+    SesSyntaxException,
+)
+from source.sqlwrangle import (
+    SqlDependency,
+    insert_select_into,
+    insert_where_one_eq_zero,
+    render_sql_template,
+)
 
 
 DEFAULT_TYPE_MAPPING_PATH = (
@@ -55,7 +66,9 @@ def generate_infer_create_table_sql(
         primary_key_columns=primary_key_columns,
     )
     identity_column = identity_column if metadata is None else metadata.identity
-    primary_key_columns = primary_key_columns if metadata is None else list(metadata.primary_key)
+    primary_key_columns = (
+        primary_key_columns if metadata is None else list(metadata.primary_key)
+    )
 
     mapping = _load_type_mapping(type_mapping_path)
     temp_table_name = _normalise_temp_table_name(temp_table_name)
@@ -78,6 +91,60 @@ def generate_infer_create_table_sql(
         f"{shape_sql}\n\n"
         f"{create_sql}\n"
         f"\ndrop table {temp_table_name};\n"
+    )
+
+
+def generate_ses_repository_ddl_sql(
+    repository: SesRepository | str | Path,
+    *,
+    temp_table_name_prefix: str = "#weaver_shape",
+) -> list[list[str]]:
+    """Generate executable DDL batches for an SES repository.
+
+    The outer list must run serially. SQL strings within one inner list have no
+    SES dependency on one another and may run in parallel.
+    """
+
+    repository = (
+        repository if isinstance(repository, SesRepository) else SesRepository(repository)
+    )
+    documents = repository.iter_documents()
+    layers = _topological_ses_document_layers(documents)
+    sql_layers = [
+        [
+            _render_ses_object_ddl(
+                document,
+                temp_table_name_prefix=temp_table_name_prefix,
+            )
+            for document in layer
+        ]
+        for layer in layers
+    ]
+
+    procedure_layer = [
+        _render_ses_load_procedure_ddl(document)
+        for document in sorted(
+            documents,
+            key=lambda item: item.metadata.qualified_name,
+        )
+        if document.metadata.is_table
+    ]
+    if procedure_layer:
+        sql_layers.append(procedure_layer)
+
+    return sql_layers
+
+
+def generate_ses_repository_ddl(
+    repository: SesRepository | str | Path,
+    *,
+    temp_table_name_prefix: str = "#weaver_shape",
+) -> list[list[str]]:
+    """Alias for ``generate_ses_repository_ddl_sql``."""
+
+    return generate_ses_repository_ddl_sql(
+        repository,
+        temp_table_name_prefix=temp_table_name_prefix,
     )
 
 
@@ -112,6 +179,90 @@ def _coerce_table_generator_inputs(
 def _require_table_metadata(metadata: SesMetadata) -> None:
     if not metadata.is_table:
         raise ValueError("SES metadata must use Table ID to generate table DDL")
+
+
+def _topological_ses_document_layers(
+    documents: tuple[SesSqlDocument, ...],
+) -> list[list[SesSqlDocument]]:
+    documents_by_name = _ses_documents_by_dependency_name(documents)
+    remaining = set(documents_by_name)
+    built: set[SqlDependency] = set()
+    layers: list[list[SesSqlDocument]] = []
+
+    while remaining:
+        ready_names = sorted(
+            dependency_name
+            for dependency_name in remaining
+            if documents_by_name[dependency_name].ses_dependencies <= built
+        )
+        if not ready_names:
+            cycle = ", ".join(
+                _format_unquoted_dependency_name(dependency_name)
+                for dependency_name in sorted(remaining)
+            )
+            raise SesSyntaxException(f"SES dependency cycle detected: {cycle}")
+
+        layers.append(
+            [documents_by_name[dependency_name] for dependency_name in ready_names]
+        )
+        built.update(ready_names)
+        remaining.difference_update(ready_names)
+
+    return layers
+
+
+def _ses_documents_by_dependency_name(
+    documents: tuple[SesSqlDocument, ...],
+) -> dict[SqlDependency, SesSqlDocument]:
+    return {
+        (document.metadata.schema, document.metadata.name): document
+        for document in documents
+    }
+
+
+def _format_unquoted_dependency_name(dependency_name: SqlDependency) -> str:
+    return ".".join(dependency_name)
+
+
+def _render_ses_object_ddl(
+    document: SesSqlDocument,
+    *,
+    temp_table_name_prefix: str,
+) -> str:
+    if document.metadata.is_table:
+        temp_table_name = _ses_temp_table_name(
+            temp_table_name_prefix,
+            document.metadata.qualified_name,
+        )
+        return generate_infer_create_table_sql(
+            document,
+            temp_table_name=temp_table_name,
+        )
+
+    return wrap_create_or_alter_view(
+        document.sql_text,
+        document.metadata.qualified_name,
+    )
+
+
+def _render_ses_load_procedure_ddl(document: SesSqlDocument) -> str:
+    from source.etlhelper import generate_load_stored_procedure_sql
+
+    return generate_load_stored_procedure_sql(
+        document.sql_text,
+        document.metadata.qualified_name,
+        primary_key_columns=list(document.metadata.primary_key),
+    )
+
+
+def _ses_temp_table_name(prefix: str, qualified_name: str) -> str:
+    normalised_prefix = prefix if prefix.startswith("#") else f"#{prefix}"
+    safe_name = re.sub(r"[^A-Za-z0-9_]", "_", qualified_name)
+    candidate = f"{normalised_prefix}_{safe_name}"
+    if len(candidate) > 111:
+        digest = hashlib.sha1(qualified_name.encode("utf-8")).hexdigest()[:12]
+        candidate = f"{candidate[:98]}_{digest}"
+    return _normalise_temp_table_name(candidate)
 
 
 def build_create_table_sql_from_describe_rows(
@@ -329,19 +480,16 @@ def _render_backing_table_and_view_sql(
     )
     post_create_section = f"\n\n{post_create_sql}" if post_create_sql else ""
 
-    return (
-        f"create table {table_names.current_table} (\n"
-        f"{joined_current_columns}\n"
-        ");\n\n"
-        f"create table {table_names.history_table} (\n"
-        f"{joined_history_columns}\n"
-        ");"
-        f"{post_create_section}\n\n"
-        f"create or alter view {table_names.view_name} as\n"
-        "select\n"
-        f"{joined_view_columns}\n"
-        f"from {table_names.current_table};"
-    )
+    return render_sql_template(
+        "ddl/backing_table_and_view",
+        current_table=table_names.current_table,
+        current_columns=joined_current_columns,
+        history_table=table_names.history_table,
+        history_columns=joined_history_columns,
+        post_create_section=post_create_section,
+        view_name=table_names.view_name,
+        view_columns=joined_view_columns,
+    ).rstrip()
 
 
 def _join_leading_comma_list(
@@ -444,59 +592,11 @@ def _render_metadata_column_validation_sql(
         return ""
 
     metadata_columns_cte = _render_metadata_columns_cte(referenced_columns)
-    return f"""declare @weaver_missing_metadata_column nvarchar(2048);
-
-;with raw_described as (
-    select
-        c.column_id as column_ordinal,
-        coalesce(nullif(c.name, ''), concat('Column', c.column_id)) as column_name
-    from tempdb.sys.columns as c
-    where c.[object_id] = object_id({temp_object_literal})
-),
-described as (
-    select
-        column_ordinal,
-        case
-            when count(*) over (partition by column_name) = 1 then column_name
-            else concat(
-                column_name,
-                '_',
-                row_number() over (partition by column_name order by column_ordinal)
-            )
-        end as column_name
-    from raw_described
-),
-generated_columns as (
-    select
-        column_name
-    from described
-
-    union all
-
-    select
-        @weaver_identity_column
-    where @weaver_identity_column is not null
-),
-metadata_columns as (
-{metadata_columns_cte}
-)
-select top (1)
-    @weaver_missing_metadata_column =
-        concat(metadata_kind, N' ', column_name, N' does not exist')
-from metadata_columns as m
-where not exists (
-    select 1
-    from generated_columns as gc
-    where lower(gc.column_name) = lower(m.column_name)
-)
-order by
-    metadata_kind
-  , column_name;
-
-if @weaver_missing_metadata_column is not null
-begin
-    throw 51004, @weaver_missing_metadata_column, 1;
-end;"""
+    return render_sql_template(
+        "ddl/metadata_column_validation",
+        temp_object_literal=temp_object_literal,
+        metadata_columns_cte=metadata_columns_cte,
+    ).rstrip()
 
 
 def _render_metadata_columns_cte(referenced_columns: list[tuple[str, str]]) -> str:
@@ -535,193 +635,20 @@ def _render_infer_create_sql(
         metadata=metadata,
     )
 
-    return f"""declare @weaver_identity_column varchar(128) = {identity_literal};
-declare @weaver_current_create_sql nvarchar(max);
-declare @weaver_history_create_sql nvarchar(max);
-declare @weaver_current_pk_sql nvarchar(max);
-declare @weaver_view_sql nvarchar(max);
-
-if not exists (
-    select 1
-    from tempdb.sys.columns as c
-    where c.[object_id] = object_id({temp_object_literal})
-)
-begin
-    throw 51001, 'weaver found no temp table columns to create.', 1;
-end;
-
-{metadata_validation_sql}
-
-;with primary_key_columns as (
-{primary_key_columns_cte}
-),
-raw_described as (
-    select
-        c.column_id as column_ordinal,
-        coalesce(nullif(c.name, ''), concat('Column', c.column_id)) as column_name,
-        t.name as system_type_name,
-        c.max_length,
-        c.precision,
-        c.scale,
-        c.is_nullable
-    from tempdb.sys.columns as c
-    inner join tempdb.sys.types as t on t.user_type_id = c.user_type_id
-    where c.[object_id] = object_id({temp_object_literal})
-),
-described as (
-    select
-        column_ordinal,
-        case
-            when count(*) over (partition by column_name) = 1 then column_name
-            else concat(
-                column_name,
-                '_',
-                row_number() over (partition by column_name order by column_ordinal)
-            )
-        end as column_name,
-        system_type_name,
-        max_length,
-        precision,
-        scale,
-        is_nullable
-    from raw_described
-),
-mapped as (
-    select
-        d.column_ordinal,
-        quotename(d.column_name) as quoted_column_name,
-        {type_case} as warehouse_type,
-        case
-            when pk.column_name is not null or d.is_nullable = 0 then N' not null'
-            else N' null'
-        end as nullability
-    from described as d
-    left join primary_key_columns as pk on lower(pk.column_name) = lower(d.column_name)
-    cross apply (
-        select
-            lower(d.system_type_name) as base_type
-    ) as bt
-),
-source_column_definitions as (
-    select
-        column_ordinal + case when @weaver_identity_column is null then 0 else 1 end as column_ordinal,
-        quoted_column_name,
-        quoted_column_name + N' ' + warehouse_type + nullability as current_column_definition,
-        quoted_column_name + N' ' + warehouse_type + nullability as history_column_definition,
-        quoted_column_name as view_column
-    from mapped
-),
-all_columns as (
-    select
-        1 as column_ordinal,
-        quotename(@weaver_identity_column) as quoted_column_name,
-        quotename(@weaver_identity_column) + N' {identity_type}' as current_column_definition,
-        quotename(@weaver_identity_column) + N' {history_identity_type}' as history_column_definition,
-        quotename(@weaver_identity_column) as view_column
-    where @weaver_identity_column is not null
-
-    union all
-
-    select
-        column_ordinal,
-        quoted_column_name,
-        current_column_definition,
-        history_column_definition,
-        view_column
-    from source_column_definitions
-
-    union all
-
-    select
-        1000001,
-        N'[Row insert datetime]',
-        N'[Row insert datetime] datetime2(6) null',
-        N'[Row insert datetime] datetime2(6) null',
-        N'[Row insert datetime]'
-
-    union all
-
-    select
-        1000002,
-        N'[Row update datetime]',
-        N'[Row update datetime] datetime2(6) null',
-        N'[Row update datetime] datetime2(6) null',
-        N'[Row update datetime]'
-
-    union all
-
-    select
-        1000003,
-        N'[Row delete datetime]',
-        N'[Row delete datetime] datetime2(6) not null',
-        N'[Row delete datetime] datetime2(6) not null',
-        null
-)
-select
-    @weaver_current_create_sql = (
-        select
-            N'create table {table_names.current_table} (' + char(10)
-            + string_agg(
-                case
-                    when column_ordinal = 1 then N'    ' + current_column_definition
-                    else N'  , ' + current_column_definition
-                end,
-                char(10)
-            ) within group (order by column_ordinal)
-            + char(10) + N');'
-        from all_columns
-    ),
-    @weaver_history_create_sql = (
-        select
-            N'create table {table_names.history_table} (' + char(10)
-            + string_agg(
-                case
-                    when column_ordinal = 1 then N'    ' + history_column_definition
-                    else N'  , ' + history_column_definition
-                end,
-                char(10)
-            ) within group (order by column_ordinal)
-            + char(10) + N');'
-        from all_columns
-    ),
-    @weaver_view_sql = (
-        select
-            N'create or alter view {table_names.view_name} as' + char(10)
-            + N'select' + char(10)
-            + string_agg(
-                case
-                    when column_ordinal = 1 then N'    ' + view_column
-                    else N'  , ' + view_column
-                end,
-                char(10)
-            ) within group (order by column_ordinal)
-            + char(10) + N'from {table_names.current_table};'
-        from all_columns
-        where view_column is not null
-    ),
-    @weaver_current_pk_sql = (
-        select
-            N'alter table {table_names.current_table} add constraint {table_names.current_pk_constraint} '
-            + N'primary key nonclustered ('
-            + string_agg(quotename(column_name), N', ') within group (order by column_ordinal)
-            + N') not enforced;'
-        from primary_key_columns
-    );
-
-print @weaver_current_create_sql;
-exec sys.sp_executesql @weaver_current_create_sql;
-
-print @weaver_history_create_sql;
-exec sys.sp_executesql @weaver_history_create_sql;
-
-if @weaver_current_pk_sql is not null
-begin
-    print @weaver_current_pk_sql;
-    exec sys.sp_executesql @weaver_current_pk_sql;
-end;
-
-print @weaver_view_sql;
-exec sys.sp_executesql @weaver_view_sql;"""
+    return render_sql_template(
+        "ddl/infer_create_table",
+        identity_literal=identity_literal,
+        temp_object_literal=temp_object_literal,
+        metadata_validation_sql=metadata_validation_sql,
+        primary_key_columns_cte=primary_key_columns_cte,
+        type_case=type_case,
+        identity_type=identity_type,
+        history_identity_type=history_identity_type,
+        current_table=table_names.current_table,
+        history_table=table_names.history_table,
+        view_name=table_names.view_name,
+        current_pk_constraint=table_names.current_pk_constraint,
+    ).rstrip()
 
 
 def _disambiguate_column_names(column_names: list[str]) -> list[str]:

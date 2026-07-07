@@ -5,14 +5,17 @@ import pytest
 from source.ddlhelper import (
     build_create_table_sql_from_describe_rows,
     generate_infer_create_table_sql,
+    generate_ses_repository_ddl,
+    generate_ses_repository_ddl_sql,
     wrap_create_or_alter_view,
 )
 from source.etlhelper import generate_load_stored_procedure_sql
-from source.seshelper import parse_ses_sql, read_ses_sql_file
+from source.seshelper import SesSyntaxException, parse_ses_sql, read_ses_sql_file
 
 
 FABRIC_SAMPLE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "fabric_sample_sql"
 SES_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ses"
+SES_DAG_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ses_dag"
 
 
 def _fabric_sample_fixture_sql(name):
@@ -21,6 +24,14 @@ def _fabric_sample_fixture_sql(name):
 
 def _ses_fixture(name):
     return read_ses_sql_file(SES_FIXTURE_DIR / name)
+
+
+def _sql_with_metadata(metadata: str, body: str) -> str:
+    return f"/*\n{metadata.strip()}\n*/\n\n{body}"
+
+
+def _layer_contains(layer, marker):
+    return any(marker in sql for sql in layer)
 
 
 def _materialise_installed_procedure(installer_sql, replacements):
@@ -420,6 +431,94 @@ def test_build_create_table_sql_from_describe_rows_requires_schema_table_name():
 
     with pytest.raises(ValueError, match="schema.table"):
         build_create_table_sql_from_describe_rows(rows, "NoSchema")
+
+
+def test_generate_ses_repository_ddl_sql_layers_objects_then_load_procedures():
+    ddl_layers = generate_ses_repository_ddl_sql(SES_DAG_FIXTURE_DIR)
+
+    assert [len(layer) for layer in ddl_layers] == [2, 2, 1, 1, 1, 5]
+
+    assert _layer_contains(ddl_layers[0], "create table [dim].[Product_Current]")
+    assert _layer_contains(ddl_layers[0], "create table [raw].[Customer_Current]")
+    assert _layer_contains(ddl_layers[1], "create table [dim].[Customer_Current]")
+    assert _layer_contains(ddl_layers[1], "create table [raw].[Order_Current]")
+    assert _layer_contains(ddl_layers[2], "create table [fact].[Order_Current]")
+    assert _layer_contains(
+        ddl_layers[3],
+        "create or alter view [report].[CustomerOrderSummary] as",
+    )
+    assert _layer_contains(
+        ddl_layers[4],
+        "create or alter view [audit].[CustomerOrderQuality] as",
+    )
+
+    procedure_layer = ddl_layers[-1]
+    assert all(
+        sql.startswith("/* weaver generated etl procedure installer. */")
+        for sql in procedure_layer
+    )
+    assert _layer_contains(
+        procedure_layer,
+        "set @weaver_proc_sql = N'create or alter procedure [_].[ETL dim.Customer]",
+    )
+    assert _layer_contains(
+        procedure_layer,
+        "set @weaver_proc_sql = N'create or alter procedure [_].[ETL dim.Product]",
+    )
+    assert _layer_contains(
+        procedure_layer,
+        "set @weaver_proc_sql = N'create or alter procedure [_].[ETL fact.Order]",
+    )
+    assert _layer_contains(
+        procedure_layer,
+        "set @weaver_proc_sql = N'create or alter procedure [_].[ETL raw.Customer]",
+    )
+    assert _layer_contains(
+        procedure_layer,
+        "set @weaver_proc_sql = N'create or alter procedure [_].[ETL raw.Order]",
+    )
+
+
+def test_generate_ses_repository_ddl_uses_stable_temp_table_names():
+    ddl_layers = generate_ses_repository_ddl(
+        SES_DAG_FIXTURE_DIR,
+        temp_table_name_prefix="#shape",
+    )
+
+    assert _layer_contains(ddl_layers[0], "into #shape_dim_Product")
+    assert _layer_contains(ddl_layers[0], "into #shape_raw_Customer")
+    assert _layer_contains(ddl_layers[1], "into #shape_dim_Customer")
+    assert _layer_contains(ddl_layers[1], "into #shape_raw_Order")
+
+
+def test_generate_ses_repository_ddl_sql_rejects_dependency_cycles(tmp_path):
+    (tmp_path / "a.A.sql").write_text(
+        _sql_with_metadata(
+            """
+View ID: a.A
+Description: Cycle A.
+Revisions:
+    - 2026-06-16 Initial.
+""",
+            "select * from b.B;\n",
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "b.B.sql").write_text(
+        _sql_with_metadata(
+            """
+View ID: b.B
+Description: Cycle B.
+Revisions:
+    - 2026-06-16 Initial.
+""",
+            "select * from a.A;\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SesSyntaxException, match="dependency cycle"):
+        generate_ses_repository_ddl_sql(tmp_path)
 
 
 def test_generate_load_stored_procedure_sql_builds_pk_incremental_loader():
