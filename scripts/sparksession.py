@@ -20,8 +20,8 @@ from azure.identity import DefaultAzureCredential
 DEFAULT_API_BASE_URL = "https://api.fabric.microsoft.com"
 DEFAULT_API_VERSION = "2023-12-01"
 DEFAULT_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
-DEFAULT_WORKSPACE_NAME = "I Love Government"
-DEFAULT_LAKEHOUSE_NAME = "T1"
+DEFAULT_WORKSPACE_NAME = None
+DEFAULT_LAKEHOUSE_NAME = None
 DEFAULT_CODE = "\n".join(
     [
         'df = spark.createDataFrame([("hello world",)], ["message"])',

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronise the configured DWG platform Git repositories into Fabric."""
+"""Synchronise configured Git repositories into Fabric."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def load_sync_config(config_path: Path) -> dict[str, Any]:
 
 
 def infer_platform_root(config_path: Path, repository_entries: list[dict[str, Any]]) -> Path:
-    """Infer the containing dwg-platform directory for repository source paths."""
+    """Infer the containing platform directory for repository source paths."""
 
     candidates = [config_path.parent.parent, config_path.parent]
     for candidate in candidates:

@@ -527,7 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-folder",
         required=True,
-        help="Lakehouse Files target folder, for example Files/dwg-platform/weaver.",
+        help="Lakehouse Files target folder, for example Files/platform/weaver.",
     )
     workspace = parser.add_mutually_exclusive_group(required=False)
     workspace.add_argument("--workspace-id", default=os.environ.get("FABRIC_WORKSPACE_ID"))

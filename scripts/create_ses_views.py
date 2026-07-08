@@ -147,6 +147,8 @@ def create_views_with_retries(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ses-dir", type=Path, default=DEFAULT_SES_DIR)
+    parser.add_argument("--server", default=os.environ.get("SQLSERVER_HOST"))
+    parser.add_argument("--database", default=os.environ.get("SQLSERVER_DATABASE"))
     return parser.parse_args()
 
 
@@ -161,7 +163,7 @@ def main() -> int:
     definitions = [(path, *read_view_definition(path)) for path in files]
     schemas = sorted({schema for _, schema, _, _ in definitions})
 
-    with connect() as conn:
+    with connect(server=args.server, database=args.database) as conn:
         cursor = conn.cursor()
         for schema in schemas:
             create_schema(cursor, schema)

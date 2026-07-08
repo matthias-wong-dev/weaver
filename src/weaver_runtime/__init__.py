@@ -1,4 +1,4 @@
-"""Runtime helpers for DWG platform Fabric notebooks."""
+"""Runtime helpers for mirrored Fabric platform notebooks."""
 
 from __future__ import annotations
 

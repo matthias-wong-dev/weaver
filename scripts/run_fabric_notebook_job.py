@@ -18,7 +18,7 @@ from azure.identity import DefaultAzureCredential
 
 API_BASE_URL = "https://api.fabric.microsoft.com"
 FABRIC_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
-DEFAULT_WORKSPACE_NAME = "I Love Government"
+DEFAULT_WORKSPACE_NAME = None
 TERMINAL_STATES = {"completed", "failed", "cancelled", "canceled", "deduped"}
 SUCCESS_STATES = {"completed", "deduped"}
 

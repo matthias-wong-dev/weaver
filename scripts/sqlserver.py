@@ -17,11 +17,8 @@ import pyodbc
 from azure.identity import DefaultAzureCredential
 
 
-DEFAULT_SERVER = (
-    "pwr2h2pen2uuvb4rxrfbjz6nc4-yap6uh3fj2gezdnp6uajowpmi4"
-    ".datawarehouse.fabric.microsoft.com"
-)
-DEFAULT_DATABASE = "T2"
+DEFAULT_SERVER = None
+DEFAULT_DATABASE = None
 DEFAULT_SQL = "SELECT 1 AS ok"
 
 
@@ -44,7 +41,9 @@ def build_access_token_attr() -> dict[int, bytes]:
     return {1256: struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)}
 
 
-def connect(server: str = DEFAULT_SERVER, database: str | None = DEFAULT_DATABASE) -> pyodbc.Connection:
+def connect(server: str | None = DEFAULT_SERVER, database: str | None = DEFAULT_DATABASE) -> pyodbc.Connection:
+    if not server:
+        raise ValueError("SQL server is required")
     connection_string = build_connection_string(server, database)
     attrs_before = build_access_token_attr()
     return pyodbc.connect(connection_string, attrs_before=attrs_before, timeout=30)
@@ -52,7 +51,7 @@ def connect(server: str = DEFAULT_SERVER, database: str | None = DEFAULT_DATABAS
 
 def run_sql(
     sql: str,
-    server: str = DEFAULT_SERVER,
+    server: str | None = DEFAULT_SERVER,
     database: str | None = DEFAULT_DATABASE,
 ) -> tuple[list[str], list[tuple], int]:
     with connect(server=server, database=database) as conn:
@@ -69,8 +68,8 @@ def run_sql(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default=os.environ.get("SQLSERVER_HOST", DEFAULT_SERVER))
-    parser.add_argument("--database", default=os.environ.get("SQLSERVER_DATABASE", DEFAULT_DATABASE))
+    parser.add_argument("--server", default=os.environ.get("SQLSERVER_HOST") or DEFAULT_SERVER)
+    parser.add_argument("--database", default=os.environ.get("SQLSERVER_DATABASE") or DEFAULT_DATABASE)
     parser.add_argument("--sql", default=DEFAULT_SQL)
     parser.add_argument("--file", help="Read SQL from a file instead of --sql. Use '-' for stdin.")
     parser.add_argument("--stdin", action="store_true", help="Read SQL from standard input instead of --sql.")
