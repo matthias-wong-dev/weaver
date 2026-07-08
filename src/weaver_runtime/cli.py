@@ -184,6 +184,8 @@ def handle_workspace_push(args: argparse.Namespace, passthrough: list[str]) -> i
 
 def handle_platform_push(args: argparse.Namespace, passthrough: list[str]) -> int:
     config = load_config(args)
+    if not hasattr(args, "repository"):
+        args.repository = []
     lakehouse_payload = sync_lakehouse(config, args)
     workspace_args = argparse.Namespace(
         **{
