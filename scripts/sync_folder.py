@@ -26,7 +26,7 @@ DEFAULT_ONELAKE_BASE_URL = "https://onelake.dfs.fabric.microsoft.com"
 DEFAULT_FABRIC_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 DEFAULT_STORAGE_SCOPE = "https://storage.azure.com/.default"
 DEFAULT_LOCAL_DIR = Path(".")
-DEFAULT_LAKEHOUSE_FOLDER = "DWG-platform"
+DEFAULT_LAKEHOUSE_FOLDER = "dwg-platform"
 DEFAULT_WORKSPACE_NAME = "I Love Government"
 DEFAULT_LAKEHOUSE_NAME = "T1"
 SYNC_SUFFIXES = {".py", ".json", ".txt", ".md", ".toml", ".yaml", ".yml"}
@@ -90,7 +90,13 @@ def request_bytes(
             detail = response_body.decode("utf-8", errors="replace")
             raise SyncError(f"{method} {url} returned HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            if attempt < MAX_REQUEST_ATTEMPTS and "timed out" in str(exc.reason).lower():
+            reason = str(exc.reason).lower()
+            if attempt < MAX_REQUEST_ATTEMPTS and (
+                "timed out" in reason
+                or "connection reset" in reason
+                or "connection aborted" in reason
+                or "remote end closed" in reason
+            ):
                 time.sleep(min(2 ** attempt, 10))
                 continue
             raise SyncError(f"{method} {url} failed: {exc.reason}") from exc
