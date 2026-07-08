@@ -1,1 +1,0 @@
-# Hello DWG platform uses only the mirrored repository source and standard library.
