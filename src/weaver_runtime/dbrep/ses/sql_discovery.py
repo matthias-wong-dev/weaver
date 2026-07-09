@@ -17,9 +17,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import sqlparse
-from sqlparse.exceptions import SQLParseError
-from sqlparse import tokens as T
+# sqlparse is imported lazily (see _flatten / _tokens): SQL dependency discovery
+# only runs at build time, so the installed Fabric runtime never needs sqlparse.
+
+_TOKENS = None
+
+
+def _tokens():
+    global _TOKENS
+    if _TOKENS is None:
+        from sqlparse import tokens as _t
+
+        _TOKENS = _t
+    return _TOKENS
+
 
 _FROM_BOUNDARY_KEYWORDS = {
     "FOR",
@@ -33,6 +44,8 @@ _FROM_BOUNDARY_KEYWORDS = {
     "INTERSECT",
     "WHERE",
 }
+
+_FROM_FUNCTIONS = {"TRIM", "SUBSTRING", "EXTRACT", "OVERLAY"}
 
 _STATEMENT_START_KEYWORDS = {
     "ALTER",
@@ -61,6 +74,8 @@ class _FlatToken:
 def extract_sql_references(sql_text: str) -> tuple[tuple[str, ...], ...]:
     """Return ordered, de-duplicated 2/3/4-part relation references."""
 
+    from sqlparse.exceptions import SQLParseError
+
     try:
         tokens = _flatten(sql_text)
     except SQLParseError:
@@ -74,6 +89,9 @@ def extract_sql_references(sql_text: str) -> tuple[tuple[str, ...], ...]:
         head = _keyword_head(token)
         words = set(token.normalized.split())
         if head == "FROM":
+            # Skip function-internal FROM, e.g. TRIM(chars FROM value).
+            if _enclosing_function(tokens, index) in _FROM_FUNCTIONS:
+                continue
             for parts in _from_relations(sql_text, tokens, index):
                 _add(references, seen, parts)
         elif head in {"APPLY", "USING"} or "JOIN" in words:
@@ -219,6 +237,8 @@ def _skip_space(sql_text: str, start: int) -> int:
 
 
 def _flatten(sql_text: str) -> list[_FlatToken]:
+    import sqlparse
+
     flat: list[_FlatToken] = []
     offset = 0
     depth = 0
@@ -251,12 +271,42 @@ def _next_significant(tokens: list[_FlatToken], index: int) -> int | None:
     return None
 
 
+def _prev_significant(tokens: list[_FlatToken], index: int) -> int | None:
+    for candidate in range(index - 1, -1, -1):
+        if not _is_trivia(tokens[candidate]):
+            return candidate
+    return None
+
+
+def _enclosing_function(tokens: list[_FlatToken], index: int) -> str | None:
+    """Return the function keyword of the paren enclosing token ``index``.
+
+    Walks back to the nearest unmatched ``(`` and returns the head keyword of the
+    token before it (e.g. ``TRIM`` for ``trim(chars from value)``), or ``None``.
+    """
+
+    depth = 0
+    for candidate in range(index - 1, -1, -1):
+        value = tokens[candidate].value
+        if value == ")":
+            depth += 1
+        elif value == "(":
+            if depth == 0:
+                previous = _prev_significant(tokens, candidate)
+                if previous is None:
+                    return None
+                return _keyword_head(tokens[previous])
+            depth -= 1
+    return None
+
+
 def _is_trivia(token: _FlatToken) -> bool:
-    return token.ttype in T.Whitespace or token.ttype in T.Comment
+    tokens = _tokens()
+    return token.ttype in tokens.Whitespace or token.ttype in tokens.Comment
 
 
 def _is_keyword(token: _FlatToken) -> bool:
-    return token.ttype in T.Keyword
+    return token.ttype in _tokens().Keyword
 
 
 def _keyword_head(token: _FlatToken) -> str:

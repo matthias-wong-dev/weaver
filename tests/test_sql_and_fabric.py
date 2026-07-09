@@ -9,7 +9,8 @@ from dbrep_helpers import make_config, resolve, write_config_files, write_python
 from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
 from weaver_runtime.dbrep.build.runtime_bundle import install_build
 from weaver_runtime.dbrep.cli.commands import run_load
-from weaver_runtime.dbrep.errors import BuildError, LoadError
+from weaver_runtime.dbrep.errors import BuildError
+from weaver_runtime.dbrep.sql.backend import build_sql_target
 from weaver_runtime.dbrep.targets.fabric_lakehouse import FabricLakehouseHost
 
 
@@ -83,21 +84,18 @@ def test_sql_load_dry_run_describes_procedure(tmp_path: Path) -> None:
     assert descriptor["executed"] is False
 
 
-def test_sql_load_execution_not_implemented(tmp_path: Path) -> None:
-    _sql_setup(tmp_path)
-    weaver = write_config_files(
-        tmp_path,
-        {
-            "SES_Repo": {"server": str(tmp_path / "SES")},
-            "Warehouse": {"server": "endpoint.example.com", "degrees_of_parallelism": 8},
-        },
-        {
-            "T2_SES": {"type": "SES", "server": "SES_Repo", "database": "T2"},
-            "T2_SQL": {"type": "SQL", "server": "Warehouse", "database": "T2"},
-        },
+def test_sql_build_requires_sql_source_objects(tmp_path: Path) -> None:
+    # A Python-authored object cannot install to a SQL target: the SQL backend
+    # validates source language before touching the network.
+    config = _sql_setup(tmp_path)
+    plan = plan_build(
+        BuildRequest(pairs=(BuildPair(resolve(config, "T2_SES"), resolve(config, "T2_SQL")),))
     )
-    with pytest.raises(LoadError, match="not implemented"):
-        run_load(weaver, "T2_SQL", dry_run=False)
+    target = resolve(config, "T2_SQL")
+    python_objects = [o for o in plan.objects if o.source.language == "python"]
+    assert python_objects  # _sql_setup writes a python Mart.Aggregate
+    with pytest.raises(BuildError, match="requires .sql source objects"):
+        build_sql_target(python_objects, target)
 
 
 def test_fabric_host_interface_is_documented_stub(tmp_path: Path) -> None:

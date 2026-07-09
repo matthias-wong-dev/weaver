@@ -27,7 +27,8 @@ import yaml
 
 from ..errors import ConfigError
 
-_ALLOWED_SERVER_KEYS = {"server", "degrees_of_parallelism"}
+_ALLOWED_SERVER_KEYS = {"server", "degrees_of_parallelism", "platform"}
+_ALLOWED_PLATFORMS = {"local", "fabric"}
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,15 @@ class ServerConfig:
     ``server`` is a raw host value. Its meaning depends on the database
     representation that points at it: a filesystem parent for SES, a Lakehouse
     host for Files/Delta, or a SQL endpoint for SQL.
+
+    ``platform`` is ``local`` (filesystem, the default) or ``fabric`` (OneLake /
+    Fabric Spark). For a Fabric Lakehouse host, ``server`` is ``Workspace/Lakehouse``.
     """
 
     alias: str
     server: str
     degrees_of_parallelism: int | None = None
+    platform: str = "local"
 
 
 @dataclass(frozen=True)
@@ -122,4 +127,15 @@ def _parse_server(alias: str, raw: Any) -> ServerConfig:
                 f"server {alias!r} degrees_of_parallelism must be a positive integer"
             )
 
-    return ServerConfig(alias=alias, server=server.strip(), degrees_of_parallelism=dop)
+    platform = raw.get("platform", "local")
+    if platform not in _ALLOWED_PLATFORMS:
+        raise ConfigError(
+            f"server {alias!r} platform must be one of {', '.join(sorted(_ALLOWED_PLATFORMS))}"
+        )
+
+    return ServerConfig(
+        alias=alias,
+        server=server.strip(),
+        degrees_of_parallelism=dop,
+        platform=platform,
+    )

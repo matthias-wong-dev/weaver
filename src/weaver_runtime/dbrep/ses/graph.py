@@ -53,6 +53,43 @@ def topological_order(nodes: Iterable[str], edges: Iterable[tuple[str, str]]) ->
     return order
 
 
+def topological_layers(nodes: Iterable[str], edges: Iterable[tuple[str, str]]) -> list[list[str]]:
+    """Group nodes into dependency layers.
+
+    Each layer is a sorted list of nodes whose dependencies all appear in earlier
+    layers; nodes within a layer are independent and may run in parallel. Raises
+    :class:`GraphError` on a cycle.
+    """
+
+    node_set = set(nodes)
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    indegree: dict[str, int] = {node: 0 for node in node_set}
+    for before, after in edges:
+        if before not in node_set or after not in node_set:
+            continue
+        if after not in adjacency[before]:
+            adjacency[before].add(after)
+            indegree[after] += 1
+
+    remaining = set(node_set)
+    layers: list[list[str]] = []
+    ready = sorted(node for node in remaining if indegree[node] == 0)
+    while ready:
+        layers.append(ready)
+        for node in ready:
+            remaining.discard(node)
+            for neighbour in adjacency[node]:
+                indegree[neighbour] -= 1
+        ready = sorted(node for node in remaining if indegree[node] == 0)
+
+    if remaining:
+        cycle = _find_cycle(node_set, adjacency)
+        detail = " -> ".join(cycle) if cycle else "unknown"
+        raise GraphError(f"dependency cycle detected: {detail}")
+
+    return layers
+
+
 def _find_cycle(nodes: set[str], adjacency: dict[str, set[str]]) -> list[str]:
     WHITE, GREY, BLACK = 0, 1, 2
     colour = {node: WHITE for node in nodes}

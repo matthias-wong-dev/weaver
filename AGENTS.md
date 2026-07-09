@@ -72,7 +72,31 @@ static (`self.repo["..."]` / SQL `from`/`join`); two-part refs are
 intra-database, three-part are managed cross-database only when supplied, else
 external; discovery ignores every `_`-prefixed folder/file. Keep PySpark out of
 core — it is a lazy import confined to `runtime/load.py` and `runtime/load_policy`
-is a pure, PySpark-free reference for load behaviour.
+is a pure, PySpark-free reference for load behaviour. `sqlparse`, `pyodbc`, and
+`azure-identity` are also lazy so the core (and the installed Fabric runtime)
+import them only when SQL discovery / SQL connections actually run.
+
+### SQL backend (`dbrep/sql`)
+
+Real SQL builds run against a Fabric Warehouse. DDL/load are ported from the
+legacy `source` machinery (self-inferring backing table + view, ETL load
+procedure). Build executes DDL **layer by layer** using the dependency graph
+(no retry loops), parallel within a layer up to the server's
+`degrees_of_parallelism`; it records managed objects in a `_weaver.objects` table
+inside the warehouse so `--prune` drops only removed managed objects. `weaver
+load --target <SQL>` executes installed load procedures in dependency order.
+Source objects for a SQL target must be `.sql`.
+
+### Fabric Lakehouse backend (`dbrep/fabric`)
+
+Set `platform: fabric` on a server whose `server` is `Workspace/Lakehouse`.
+Build stages the bundle locally then uploads `Files/` to OneLake (reusing
+`scripts/sync_folder`). Load submits the bundled orchestrator to Fabric Spark via
+Livy (`scripts/sparksession`): it mounts the Lakehouse for orchestrator import +
+Folder Python IO, and passes the `abfss://` OneLake path as `spark_root` for all
+Delta reads/writes (the FUSE mount cannot host Spark Delta writes). Fabric-facing
+object files must join paths with f-strings, not `pathlib.Path` (which mangles
+`abfss://`).
 
 ## Tests
 
@@ -92,6 +116,17 @@ default; run them with Homebrew Java 17 (see `dwg-site-kit/AGENTS.md` for the
 ../.venv/bin/python -m pytest -m spark
 ```
 
+Opt-in Fabric integration tests live under `tests/fabric/` (deselected by
+default; they need `az login`). They create a disposable Warehouse and Lakehouse
+in the given workspace via the Fabric REST API and delete them afterwards, so
+they only need the workspace and skip unless it is set:
+
+```bash
+WEAVER_FABRIC_WORKSPACE=<workspace name or id> \
+../.venv/bin/python -m pytest -m fabric
+```
+
+Default `pytest` runs core only (`addopts = -m "not spark and not fabric"`).
 Tests include a guard that `src/weaver_runtime` does not contain product or
 environment defaults.
 

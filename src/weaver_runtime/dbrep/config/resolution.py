@@ -49,6 +49,24 @@ class ResolvedDatabase:
     host: str
     degrees_of_parallelism: int | None
     base_dir: Path
+    platform: str = "local"
+
+    @property
+    def is_fabric(self) -> bool:
+        return self.platform == "fabric"
+
+    @property
+    def fabric_workspace(self) -> str:
+        """Workspace name parsed from a ``Workspace/Lakehouse`` Fabric host."""
+
+        return self.host.split("/", 1)[0]
+
+    @property
+    def fabric_lakehouse(self) -> str:
+        """Lakehouse name parsed from a ``Workspace/Lakehouse`` Fabric host."""
+
+        parts = self.host.split("/", 1)
+        return parts[1] if len(parts) == 2 else self.database
 
     @property
     def is_ses(self) -> bool:
@@ -87,6 +105,7 @@ def resolve_database(
         host=server.server,
         degrees_of_parallelism=server.degrees_of_parallelism,
         base_dir=Path(base_dir) if base_dir is not None else environment.base_dir,
+        platform=server.platform,
     )
 
 

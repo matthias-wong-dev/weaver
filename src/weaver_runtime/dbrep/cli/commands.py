@@ -6,6 +6,7 @@ argparse layer in :mod:`.parser` prints the result as JSON.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from ..build import BuildPair, BuildRequest, format_dry_run, plan_build
@@ -66,26 +67,74 @@ def run_build(
             "external": [external.id for external in plan.external_dependencies],
         }
 
-    previous = _read_previous_objects(plan) if prune else None
-    result = install_build(plan, previous=previous)
+    fabric_pairs = [p for p in plan.pairs if p.target.is_lakehouse and p.target.is_fabric]
+    local_plan = replace(plan, pairs=tuple(p for p in plan.pairs if p not in fabric_pairs))
+
+    previous = _read_previous_objects(local_plan) if prune else None
+    result = install_build(local_plan, previous=previous)
     return {
         "dry_run": False,
         "built": list(plan.order),
         "hosts": [_host_summary(host) for host in result.hosts],
-        "sql": [
-            {
-                "target": install.target,
-                "server": install.server,
-                "database": install.database,
-                "degrees_of_parallelism": install.degrees_of_parallelism,
-                "load_procedure": install.load_procedure,
-                "objects": [action.id for action in install.actions],
-            }
-            for install in result.sql
-        ],
+        "sql": _build_sql_targets(plan),
+        "fabric": _build_fabric_targets(plan, fabric_pairs),
         "pruned": [item.id for item in result.pruned],
         "external": [external.id for external in plan.external_dependencies],
     }
+
+
+def _build_fabric_targets(plan, fabric_pairs) -> list[dict]:
+    """Stage and upload any Fabric Lakehouse targets in the plan."""
+
+    if not fabric_pairs:
+        return []
+
+    from ..fabric.lakehouse import build_fabric_lakehouse
+
+    return [
+        {
+            "targets": list(result.targets),
+            "workspace": result.workspace,
+            "lakehouse": result.lakehouse,
+            "uploaded": result.uploaded,
+            "runtime_root": result.runtime_root,
+        }
+        for result in build_fabric_lakehouse(plan, fabric_pairs)
+    ]
+
+
+def _build_sql_targets(plan) -> list[dict]:
+    """Execute real SQL builds for any SQL targets in the plan."""
+
+    sql_pairs = [
+        (pair.target, [o for o in plan.objects if o.target_alias == pair.target.alias])
+        for pair in plan.pairs
+        if pair.target.is_sql
+    ]
+    if not any(objects for _, objects in sql_pairs):
+        return []
+
+    from ..sql.backend import build_sql_target
+
+    results: list[dict] = []
+    for target, objects in sql_pairs:
+        if not objects:
+            continue
+        built = build_sql_target(objects, target, prune=plan.prune)
+        results.append(
+            {
+                "target": built.target,
+                "server": built.server,
+                "database": built.database,
+                "schemas": list(built.schemas),
+                "tables": list(built.tables),
+                "views": list(built.views),
+                "procedures": list(built.procedures),
+                "pruned": list(built.pruned),
+                "layers": [list(layer) for layer in built.layers],
+            }
+        )
+    return results
 
 
 def run_plan(config_path, from_arg: str, to_arg: str) -> dict:
@@ -105,6 +154,19 @@ def run_load(
     resolved = _resolve(config, target)
 
     if resolved.is_lakehouse:
+        if resolved.is_fabric:
+            if dry_run:
+                return {
+                    "target": target,
+                    "type": "Fabric Lakehouse",
+                    "workspace": resolved.fabric_workspace,
+                    "lakehouse": resolved.fabric_lakehouse,
+                    "executed": False,
+                }
+            from ..fabric.lakehouse import load_fabric_lakehouse
+
+            return load_fabric_lakehouse(resolved)
+
         root = runtime_root(resolved)
         report = load_target_runtime(
             root,
@@ -119,9 +181,9 @@ def run_load(
         return payload
 
     if resolved.is_sql:
-        from ..targets.sql import SQL_LOAD_PROCEDURE
-
         if dry_run:
+            from ..targets.sql import SQL_LOAD_PROCEDURE
+
             return {
                 "target": target,
                 "type": "SQL",
@@ -129,12 +191,41 @@ def run_load(
                 "database": resolved.database,
                 "degrees_of_parallelism": resolved.degrees_of_parallelism,
                 "load_procedure": SQL_LOAD_PROCEDURE,
-                "action": "execute installed load stored procedure",
+                "action": "execute installed load stored procedures",
                 "executed": False,
             }
-        raise LoadError("SQL load execution is not implemented in this stage")
+
+        from ..sql.backend import load_sql_target
+
+        result = load_sql_target(resolved, object_filter=objects)
+        return {
+            "target": target,
+            "type": "SQL",
+            "server": result.server,
+            "database": result.database,
+            "executed": True,
+            "executed_procedures": list(result.executed),
+        }
 
     raise LoadError(f"target {target!r} of type {resolved.type!r} cannot be loaded")
+
+
+def run_wipe(config_path, target: str) -> dict:
+    config = _load_config(config_path)
+    resolved = _resolve(config, target)
+    if not resolved.is_sql:
+        raise LoadError(f"wipe currently supports SQL targets only, not {resolved.type!r}")
+
+    from ..sql.backend import wipe_sql_target
+
+    result = wipe_sql_target(resolved)
+    return {
+        "target": target,
+        "server": result.server,
+        "database": result.database,
+        "before": result.before,
+        "after": result.after,
+    }
 
 
 def run_discover(config_path, database: str) -> dict:

@@ -67,11 +67,21 @@ def execute_load_plan(
     steps,
     include_static: bool = False,
     spark=None,
+    spark_root=None,
 ) -> LoadReport:
-    """Execute installed load steps in order and return a report."""
+    """Execute installed load steps in order and return a report.
+
+    ``lakehouse_root`` (derived from ``runtime_root``) is used for Python file IO
+    (Folder objects) and reading the installed runtime. ``spark_root`` is where
+    Spark reads/writes Delta tables and Folder outputs; it defaults to
+    ``lakehouse_root`` for local filesystem lakehouses, but on Fabric it is the
+    ``abfss://`` OneLake path (the FUSE mount cannot host Spark Delta writes).
+    """
 
     runtime_root = Path(runtime_root)
     lakehouse_root = runtime_root.parents[2]
+    if spark_root is None:
+        spark_root = lakehouse_root
     catalogue_by_id = {entry["id"]: entry for entry in catalogue.get("objects", [])}
     schema_by_id = _schema_by_object(dictionaries.get("column", {}))
 
@@ -94,6 +104,7 @@ def execute_load_plan(
                     schema_by_id,
                     loaded,
                     lakehouse_root,
+                    spark_root,
                     runtime_root,
                     spark,
                 )
@@ -122,6 +133,7 @@ def _run_step(
     schema_by_id,
     loaded,
     lakehouse_root,
+    spark_root,
     runtime_root,
     spark,
 ) -> StepLog:
@@ -132,7 +144,7 @@ def _run_step(
     materialisation = entry["materialisation"]
     log = StepLog(object_id=object_id, kind=kind, status="running")
 
-    repo = _make_repo(catalogue_by_id, source_object.database, object_id, lakehouse_root, spark)
+    repo = _make_repo(catalogue_by_id, source_object.database, object_id, spark_root, spark)
 
     if kind == "Folder":
         folder = lakehouse_root / materialisation
@@ -156,7 +168,7 @@ def _run_step(
         return log
 
     if kind == "Table":
-        table_path = lakehouse_root / materialisation
+        table_path = _join_root(spark_root, materialisation)
         context = LoadContext(
             runtime_root=runtime_root,
             lakehouse_root=lakehouse_root,
@@ -202,7 +214,7 @@ def _run_step(
     return log
 
 
-def _make_repo(catalogue_by_id: dict, database: str, current_id: str, lakehouse_root: Path, spark) -> Repo:
+def _make_repo(catalogue_by_id: dict, database: str, current_id: str, spark_root, spark) -> Repo:
     def resolve(key: str):
         parts = key.split(".")
         object_id = key if len(parts) >= 3 else f"{database}.{key}"
@@ -212,7 +224,7 @@ def _make_repo(catalogue_by_id: dict, database: str, current_id: str, lakehouse_
                 f"dependency {key!r} ({object_id}) required by {current_id} "
                 "is not in the installed catalogue"
             )
-        path = lakehouse_root / entry["materialisation"]
+        path = _join_root(spark_root, entry["materialisation"])
         kind = entry.get("kind")
         if kind == "Folder":
             return path
@@ -260,8 +272,32 @@ def _find_object_class(module):
     return candidates[0]
 
 
-def _read_delta_rows(spark, table_path: Path) -> list[dict]:
-    if not (table_path / "_delta_log").is_dir():
+def _join_root(root, relative: str):
+    """Join a lakehouse root and a materialisation.
+
+    Uses string joins for ``abfss://`` (and other URL) roots and path joins for
+    local filesystem roots.
+    """
+
+    root_str = str(root)
+    if "://" in root_str:
+        return f"{root_str.rstrip('/')}/{relative}"
+    return Path(root) / relative
+
+
+def _delta_exists(spark, table_path) -> bool:
+    path_str = str(table_path)
+    if "://" in path_str:
+        try:
+            spark.read.format("delta").load(path_str).schema
+            return True
+        except Exception:
+            return False
+    return (Path(table_path) / "_delta_log").is_dir()
+
+
+def _read_delta_rows(spark, table_path) -> list[dict]:
+    if not _delta_exists(spark, table_path):
         return []
     frame = spark.read.format("delta").load(str(table_path))
     return [row.asDict(recursive=True) for row in frame.collect()]
@@ -290,13 +326,13 @@ def _align_frame_to_schema(frame, schema):
         raise LoadError("failed to apply Spark SQL schema casts") from exc
 
 
-def _write_delta(spark, outcome, table_path: Path, schema) -> None:
+def _write_delta(spark, outcome, table_path, schema) -> None:
     rows = outcome.final_rows
     if rows:
         frame = spark.createDataFrame(rows, schema=_struct_type(schema))
     elif schema:
         frame = spark.createDataFrame([], schema=_struct_type(schema))
-    elif (table_path / "_delta_log").is_dir():
+    elif _delta_exists(spark, table_path):
         empty = spark.read.format("delta").load(str(table_path)).schema
         frame = spark.createDataFrame([], schema=empty)
     else:

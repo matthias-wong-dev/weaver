@@ -1,0 +1,115 @@
+set nocount on;
+
+declare @weaver_sql nvarchar(max);
+
+/* Foreign keys first so dependent tables can be dropped. */
+select
+    @weaver_sql = string_agg(
+        convert(
+            nvarchar(max),
+            N'alter table '
+            + quotename(object_schema_name(fk.parent_object_id))
+            + N'.'
+            + quotename(object_name(fk.parent_object_id))
+            + N' drop constraint '
+            + quotename(fk.name)
+            + N';'
+        ),
+        char(10)
+    )
+from sys.foreign_keys as fk
+where lower(schema_name(schema_id)) not in (N'guest', N'information_schema', N'sys', N'queryinsights');
+
+if @weaver_sql is not null
+begin
+    exec sys.sp_executesql @weaver_sql;
+end;
+
+/* Stored procedures. */
+set @weaver_sql = null;
+select
+    @weaver_sql = string_agg(
+        convert(
+            nvarchar(max),
+            N'drop procedure '
+            + quotename(schema_name(schema_id))
+            + N'.'
+            + quotename(name)
+            + N';'
+        ),
+        char(10)
+    )
+from sys.procedures
+where lower(schema_name(schema_id)) not in (N'guest', N'information_schema', N'sys', N'queryinsights');
+
+if @weaver_sql is not null
+begin
+    exec sys.sp_executesql @weaver_sql;
+end;
+
+/* Functions (scalar, inline table-valued, multi-statement table-valued). */
+set @weaver_sql = null;
+select
+    @weaver_sql = string_agg(
+        convert(
+            nvarchar(max),
+            N'drop function '
+            + quotename(schema_name(schema_id))
+            + N'.'
+            + quotename(name)
+            + N';'
+        ),
+        char(10)
+    )
+from sys.objects
+where type in (N'FN', N'IF', N'TF', N'FS', N'FT')
+    and lower(schema_name(schema_id)) not in (N'guest', N'information_schema', N'sys', N'queryinsights');
+
+if @weaver_sql is not null
+begin
+    exec sys.sp_executesql @weaver_sql;
+end;
+
+/* Views. */
+set @weaver_sql = null;
+select
+    @weaver_sql = string_agg(
+        convert(
+            nvarchar(max),
+            N'drop view '
+            + quotename(schema_name(schema_id))
+            + N'.'
+            + quotename(name)
+            + N';'
+        ),
+        char(10)
+    )
+from sys.views
+where lower(schema_name(schema_id)) not in (N'guest', N'information_schema', N'sys', N'queryinsights');
+
+if @weaver_sql is not null
+begin
+    exec sys.sp_executesql @weaver_sql;
+end;
+
+/* Tables. */
+set @weaver_sql = null;
+select
+    @weaver_sql = string_agg(
+        convert(
+            nvarchar(max),
+            N'drop table '
+            + quotename(schema_name(schema_id))
+            + N'.'
+            + quotename(name)
+            + N';'
+        ),
+        char(10)
+    )
+from sys.tables
+where lower(schema_name(schema_id)) not in (N'guest', N'information_schema', N'sys', N'queryinsights');
+
+if @weaver_sql is not null
+begin
+    exec sys.sp_executesql @weaver_sql;
+end;

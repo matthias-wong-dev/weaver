@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .commands import run_build, run_discover, run_load, run_manifest, run_plan
+from .commands import run_build, run_discover, run_load, run_manifest, run_plan, run_wipe
 
 
 def add_dbrep_subcommands(subcommands: argparse._SubParsersAction) -> None:
@@ -47,6 +47,11 @@ def add_dbrep_subcommands(subcommands: argparse._SubParsersAction) -> None:
     _config_arg(manifest)
     manifest.add_argument("--target", required=True)
     manifest.set_defaults(handler=_handle_manifest)
+
+    wipe = subcommands.add_parser("wipe", help="drop all user objects from a SQL target")
+    _config_arg(wipe)
+    wipe.add_argument("--target", required=True)
+    wipe.set_defaults(handler=_handle_wipe)
 
 
 def _config_arg(parser: argparse.ArgumentParser) -> None:
@@ -95,3 +100,7 @@ def _handle_discover(args: argparse.Namespace, passthrough: list) -> int:
 
 def _handle_manifest(args: argparse.Namespace, passthrough: list) -> int:
     return _emit(run_manifest(args.config, args.target))
+
+
+def _handle_wipe(args: argparse.Namespace, passthrough: list) -> int:
+    return _emit(run_wipe(args.config, args.target))

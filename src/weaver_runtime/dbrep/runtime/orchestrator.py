@@ -39,6 +39,7 @@ def load_target_runtime(
     include_static: bool = False,
     strict: bool = True,
     spark=None,
+    spark_root=None,
 ) -> LoadReport:
     """Load a target from its installed runtime bundle."""
 
@@ -91,6 +92,7 @@ def load_target_runtime(
         steps=steps,
         include_static=include_static,
         spark=spark,
+        spark_root=spark_root,
     )
 
 
