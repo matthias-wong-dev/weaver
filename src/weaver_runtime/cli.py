@@ -8,6 +8,8 @@ from pathlib import Path
 from ._legacy import load_script_module, run_legacy_main
 from .capacity import CapacityError, run_capacity_action
 from .config import WeaverConfig, WeaverConfigError, load_weaver_config
+from .dbrep.cli import add_dbrep_subcommands
+from .dbrep.errors import WeaverError
 from .lakehouse import print_json as print_lakehouse_json
 from .lakehouse import sync_lakehouse
 from .workspace import print_json as print_workspace_json
@@ -19,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     args, passthrough = parser.parse_known_args(argv)
     try:
         return int(args.handler(args, passthrough))
-    except (WeaverConfigError, CapacityError) as exc:
+    except (WeaverConfigError, CapacityError, WeaverError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -27,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="weaver")
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    add_dbrep_subcommands(subcommands)
 
     fabric = subcommands.add_parser("fabric")
     fabric_subcommands = fabric.add_subparsers(dest="fabric_command", required=True)

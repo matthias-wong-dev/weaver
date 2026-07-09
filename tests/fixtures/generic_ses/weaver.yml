@@ -1,0 +1,39 @@
+version: 1
+
+uses:
+  environment: env.yml
+
+databases:
+  T0_SES:
+    type: SES
+    server: SES_Repo
+    database: T0
+  T1_SES:
+    type: SES
+    server: SES_Repo
+    database: T1
+  T2_SES:
+    type: SES
+    server: SES_Repo
+    database: T2
+  T3_SES:
+    type: SES
+    server: SES_Repo
+    database: T3
+
+  T0_LOCAL_FILES:
+    type: Files
+    server: Local_Lakehouse
+    database: T0
+  T1_LOCAL_DELTA:
+    type: Delta
+    server: Local_Lakehouse
+    database: T1
+  T2_LOCAL_DELTA:
+    type: Delta
+    server: Local_Lakehouse
+    database: T2
+  T3_LOCAL_DELTA:
+    type: Delta
+    server: Local_Lakehouse
+    database: T3
