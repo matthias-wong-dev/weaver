@@ -109,11 +109,23 @@ def test_weaver_runtime_source_has_no_product_environment_defaults() -> None:
         "datawithoutguessing",
         "ilovegov",
     ]
+    scanned = [
+        ("src/weaver_runtime", "**/*.py"),
+        ("docs", "**/*.md"),
+        ("scripts", "**/*"),
+        ("config", "**/*"),
+    ]
     offenders = []
-    for path in sorted((ROOT / "src" / "weaver_runtime").glob("**/*.py")):
-        text = path.read_text(encoding="utf-8")
-        for needle in disallowed:
-            if needle in text:
-                offenders.append(f"{path.relative_to(ROOT)}: {needle}")
+    for subdir, pattern in scanned:
+        for path in sorted((ROOT / subdir).glob(pattern)):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for needle in disallowed:
+                if needle in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {needle}")
 
     assert offenders == []

@@ -1,8 +1,9 @@
 # Fabric Capacity Control
 
 You can pause, resume, and check an Azure Microsoft Fabric capacity directly
-with Azure CLI. This repo includes a small Bash wrapper with this project's
-Fabric capacity details baked in.
+with Azure CLI. This repo includes a small Bash wrapper that reads the target
+capacity from environment variables, so no environment-specific names are
+baked into the repo.
 
 ## Setup
 
@@ -22,9 +23,9 @@ The first `az fabric capacity ...` command automatically installs the
 ## Azure CLI Usage
 
 ```sh
-az fabric capacity show --resource-group rg-ilovegovernment-aue --capacity-name datawithoutguessing
-az fabric capacity suspend --resource-group rg-ilovegovernment-aue --capacity-name datawithoutguessing
-az fabric capacity resume --resource-group rg-ilovegovernment-aue --capacity-name datawithoutguessing
+az fabric capacity show --resource-group <resource-group> --capacity-name <capacity-name>
+az fabric capacity suspend --resource-group <resource-group> --capacity-name <capacity-name>
+az fabric capacity resume --resource-group <resource-group> --capacity-name <capacity-name>
 ```
 
 Add `--subscription <subscription-id>` if you do not want to rely on your
@@ -33,15 +34,18 @@ current `az account set` context.
 ## Bash Wrapper Usage
 
 ```sh
+export FABRIC_RESOURCE_GROUP=<resource-group>
+export FABRIC_CAPACITY_NAME=<capacity-name>
+
 scripts/fabric_capacity.sh status
 scripts/fabric_capacity.sh pause
 scripts/fabric_capacity.sh resume
 scripts/fabric_capacity.sh unpause
 ```
 
-The wrapper defaults to resource group `rg-ilovegovernment-aue` and capacity
-name `datawithoutguessing`. Set `FABRIC_SUBSCRIPTION_ID` if you do not want to
-rely on your current `az account set` context.
+The wrapper requires `FABRIC_RESOURCE_GROUP` and `FABRIC_CAPACITY_NAME` and
+exits with an error if either is unset. Set `FABRIC_SUBSCRIPTION_ID` as well if
+you do not want to rely on your current `az account set` context.
 
 ## Azure RBAC
 
