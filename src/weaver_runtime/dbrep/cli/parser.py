@@ -48,7 +48,7 @@ def add_dbrep_subcommands(subcommands: argparse._SubParsersAction) -> None:
     manifest.add_argument("--target", required=True)
     manifest.set_defaults(handler=_handle_manifest)
 
-    wipe = subcommands.add_parser("wipe", help="drop all user objects from a SQL target")
+    wipe = subcommands.add_parser("wipe", help="wipe a SQL/Files/Delta target's objects or materialisations")
     _config_arg(wipe)
     wipe.add_argument("--target", required=True)
     wipe.set_defaults(handler=_handle_wipe)

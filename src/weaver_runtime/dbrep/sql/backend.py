@@ -15,6 +15,7 @@ own in-database metadata table. It does not depend on any Lakehouse runtime.
 from __future__ import annotations
 
 import hashlib
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from itertools import groupby
@@ -133,6 +134,45 @@ def _object_counts(conn) -> dict:
     return {row["kind"]: row["n"] for row in rows}
 
 
+# Fabric occasionally drops a connection mid-batch (08S01 communication link
+# failure, or an "in-flight system update" during connect). All build/load
+# operations here are idempotent (create-or-alter, if-not-exists, delete+insert),
+# so retrying transient failures is safe.
+_TRANSIENT_MARKERS = (
+    "08s01",
+    "08001",
+    "communication link failure",
+    "system update",
+    "hyt00",
+    "hyt01",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    return any(marker in str(exc).lower() for marker in _TRANSIENT_MARKERS)
+
+
+def _with_retry(operation, *, attempts: int = 4, delay: float = 5.0):
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 - retried only when transient
+            if not _is_transient(exc) or attempt == attempts - 1:
+                raise
+            last = exc
+            time.sleep(delay)
+    raise last  # pragma: no cover - loop always returns or raises
+
+
+def _run_sql_with_retry(target, sql: str) -> None:
+    def operation() -> None:
+        with connect(target.host, target.database) as conn:
+            execute_script(conn, sql)
+
+    _with_retry(operation)
+
+
 def build_sql_target(
     objects: Sequence,
     target,
@@ -169,11 +209,14 @@ def build_sql_target(
         {planned.source.metadata.object_id.schema for planned in objects} | {MANAGED_SCHEMA}
     )
 
-    with connect(target.host, target.database) as conn:
-        for schema in schemas:
-            execute_script(conn, _ensure_schema_sql(schema))
-        execute_script(conn, _ENSURE_MANIFEST_TABLE_SQL)
-        previous = _read_manifest(conn)
+    def _setup():
+        with connect(target.host, target.database) as conn:
+            for schema in schemas:
+                execute_script(conn, _ensure_schema_sql(schema))
+            execute_script(conn, _ENSURE_MANIFEST_TABLE_SQL)
+            return _read_manifest(conn)
+
+    previous = _with_retry(_setup)
 
     for layer in layers:
         _run_parallel(dop, layer, lambda object_id: _install_object_ddl(target, by_id[object_id]))
@@ -181,12 +224,13 @@ def build_sql_target(
     table_ids = sorted(planned.id for planned in objects if planned.kind == TABLE)
     _run_parallel(dop, table_ids, lambda object_id: _install_load_procedure(target, by_id[object_id]))
 
-    pruned: tuple[str, ...] = ()
-    with connect(target.host, target.database) as conn:
-        for planned in objects:
-            _upsert_manifest_row(conn, planned, layer_index[planned.id])
-        if prune:
-            pruned = _prune(conn, previous, ids)
+    def _write_metadata():
+        with connect(target.host, target.database) as conn:
+            for planned in objects:
+                _upsert_manifest_row(conn, planned, layer_index[planned.id])
+            return _prune(conn, previous, ids) if prune else ()
+
+    pruned: tuple[str, ...] = _with_retry(_write_metadata)
 
     return SqlBuildResult(
         target=target.alias,
@@ -254,8 +298,7 @@ def _install_object_ddl(target, planned) -> None:
         sql = wrap_create_or_alter_view(planned.source.sql_body, name)
     else:
         raise BuildError(f"unsupported SQL object kind: {planned.kind}")
-    with connect(target.host, target.database) as conn:
-        execute_script(conn, sql)
+    _run_sql_with_retry(target, sql)
 
 
 def _install_load_procedure(target, planned) -> None:
@@ -264,13 +307,11 @@ def _install_load_procedure(target, planned) -> None:
         planned.declared_as,
         primary_key_columns=list(planned.source.metadata.primary_key),
     )
-    with connect(target.host, target.database) as conn:
-        execute_script(conn, sql)
+    _run_sql_with_retry(target, sql)
 
 
 def _exec_procedure(target, procedure_name: str) -> None:
-    with connect(target.host, target.database) as conn:
-        execute_script(conn, f"exec {procedure_name};")
+    _run_sql_with_retry(target, f"exec {procedure_name};")
 
 
 # --- metadata table --------------------------------------------------------

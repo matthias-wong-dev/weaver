@@ -213,18 +213,59 @@ def run_load(
 def run_wipe(config_path, target: str) -> dict:
     config = _load_config(config_path)
     resolved = _resolve(config, target)
-    if not resolved.is_sql:
-        raise LoadError(f"wipe currently supports SQL targets only, not {resolved.type!r}")
 
-    from ..sql.backend import wipe_sql_target
+    if resolved.is_sql:
+        from ..sql.backend import wipe_sql_target
 
-    result = wipe_sql_target(resolved)
+        result = wipe_sql_target(resolved)
+        return {
+            "target": target,
+            "type": "SQL",
+            "server": result.server,
+            "database": result.database,
+            "before": result.before,
+            "after": result.after,
+        }
+
+    if resolved.is_lakehouse:
+        return _wipe_lakehouse(target, resolved)
+
+    raise LoadError(f"wipe does not support target type {resolved.type!r}")
+
+
+def _wipe_lakehouse(target: str, resolved) -> dict:
+    """Wipe a Files or Delta representation: its materialisations under the host.
+
+    Files -> ``Files/<database>``; Delta -> ``Tables/<database>``. Local hosts use
+    a filesystem delete; Fabric hosts use a single OneLake recursive delete.
+    """
+
+    subfolder = "Files" if resolved.is_files else "Tables"
+    relative = f"{subfolder}/{resolved.database}"
+
+    if resolved.is_fabric:
+        from ..fabric import onelake
+
+        info = onelake.resolve_lakehouse(resolved.fabric_workspace, resolved.fabric_lakehouse)
+        existed = onelake.delete_directory(info, relative)
+        location = f"{resolved.fabric_workspace}/{resolved.fabric_lakehouse}/{relative}"
+    else:
+        import shutil
+
+        from ..config.resolution import lakehouse_root
+
+        path = lakehouse_root(resolved) / subfolder / resolved.database
+        existed = path.exists()
+        shutil.rmtree(path, ignore_errors=True)
+        location = str(path)
+
     return {
         "target": target,
-        "server": result.server,
-        "database": result.database,
-        "before": result.before,
-        "after": result.after,
+        "type": resolved.type,
+        "platform": "fabric" if resolved.is_fabric else "local",
+        "wiped": relative,
+        "location": location,
+        "existed": existed,
     }
 
 

@@ -82,3 +82,34 @@ def upload_files_tree(files_root: Path, resolved: dict, *, workers: int = 16) ->
         path, exc = errors[0]
         raise BuildError(f"OneLake upload failed for {path}: {exc}") from exc
     return len(paths)
+
+
+def delete_directory(resolved: dict, relative_path: str) -> bool:
+    """Recursively delete a Lakehouse directory (e.g. ``Files/<db>``, ``Tables/<db>``).
+
+    Uses a single OneLake DFS ``DELETE ...?recursive=true`` call: the whole tree
+    is removed server-side, no Spark session required. Returns ``True`` if the
+    directory existed, ``False`` if it was already absent.
+    """
+
+    import urllib.error
+    import urllib.request
+
+    base = resolved["onelake_base_url"].rstrip("/")
+    path = relative_path.strip("/")
+    url = (
+        f"{base}/{resolved['workspace_id']}/{resolved['lakehouse_id']}/{path}"
+        "?recursive=true"
+    )
+    request = urllib.request.Request(
+        url,
+        method="DELETE",
+        headers={"Authorization": f"Bearer {resolved['storage_token']}"},
+    )
+    try:
+        urllib.request.urlopen(request, timeout=120)
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise BuildError(f"OneLake delete failed for {path}: {exc}") from exc
