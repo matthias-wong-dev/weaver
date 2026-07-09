@@ -92,15 +92,11 @@ def build_load_plan(
     server: str,
     targets: Iterable[str],
     runtime_root: str = RUNTIME_RELATIVE_ROOT,
-    include_static: bool = False,
 ) -> dict:
     """Build the topologically ordered load plan for one runtime host."""
 
     steps = []
     for planned in objects_in_order:
-        metadata = planned.source.metadata
-        if metadata.static and not include_static:
-            continue
         if planned.kind == FOLDER:
             action = FOLDER_ACTION
         elif planned.kind == TABLE:

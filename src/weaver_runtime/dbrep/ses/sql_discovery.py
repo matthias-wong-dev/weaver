@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 
 import sqlparse
+from sqlparse.exceptions import SQLParseError
 from sqlparse import tokens as T
 
 _FROM_BOUNDARY_KEYWORDS = {
@@ -60,7 +61,10 @@ class _FlatToken:
 def extract_sql_references(sql_text: str) -> tuple[tuple[str, ...], ...]:
     """Return ordered, de-duplicated 2/3/4-part relation references."""
 
-    tokens = _flatten(sql_text)
+    try:
+        tokens = _flatten(sql_text)
+    except SQLParseError:
+        return _extract_sql_references_fallback(sql_text)
     references: list[tuple[str, ...]] = []
     seen: set[tuple[str, ...]] = set()
 
@@ -79,6 +83,21 @@ def extract_sql_references(sql_text: str) -> tuple[tuple[str, ...], ...]:
                 if parts is not None:
                     _add(references, seen, parts)
 
+    return tuple(references)
+
+
+def _extract_sql_references_fallback(sql_text: str) -> tuple[tuple[str, ...], ...]:
+    """Lightweight relation scanner for very large SQL bodies."""
+
+    references: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    relation_keyword = re.compile(
+        r"\b(from|join|apply|using)\b", flags=re.IGNORECASE
+    )
+    for match in relation_keyword.finditer(sql_text):
+        parts = _parse_name(sql_text, match.end())
+        if parts is not None:
+            _add(references, seen, parts)
     return tuple(references)
 
 

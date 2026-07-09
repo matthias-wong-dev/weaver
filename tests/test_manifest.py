@@ -67,7 +67,7 @@ def test_manifest_records_objects_and_dependency_scopes(tmp_path: Path) -> None:
     assert by_id["T1.Mart.Reference"]["static"] is True
 
 
-def test_load_plan_is_topologically_sorted_and_skips_static(tmp_path: Path) -> None:
+def test_load_plan_is_topologically_sorted_and_records_static(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     load_plan = build_load_plan(plan.objects, server="Lake", targets=["T0_FILES", "T1_DELTA"])
 
@@ -79,8 +79,8 @@ def test_load_plan_is_topologically_sorted_and_skips_static(tmp_path: Path) -> N
     assert actions["T0.Raw.Drop"] == "run_load"
     assert actions["T1.Stage.Record"] == "run_read_and_apply_policy"
 
-    # Static object is present in the manifest but excluded from load steps.
-    assert "T1.Mart.Reference" not in order
+    # Static filtering is a load-time decision so --include-static can work.
+    assert "T1.Mart.Reference" in order
 
 
 def test_source_hashes_cover_every_object(tmp_path: Path) -> None:

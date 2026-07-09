@@ -21,7 +21,11 @@ from .logging import LoadReport, StepLog
 from .rejects import write_rejects
 
 
-def create_delta_session(app_name: str = "weaver-load"):
+def create_delta_session(
+    app_name: str = "weaver-load",
+    *,
+    lakehouse_root: Path | None = None,
+):
     """Create a local Delta-enabled Spark session."""
 
     from delta import configure_spark_with_delta_pip
@@ -38,6 +42,19 @@ def create_delta_session(app_name: str = "weaver-load"):
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
     )
+    if lakehouse_root is not None:
+        ivy_dir = lakehouse_root / "_ivy"
+        local_dir = lakehouse_root / "_spark_tmp"
+        warehouse_dir = lakehouse_root / "_warehouse"
+        ivy_dir.mkdir(parents=True, exist_ok=True)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        warehouse_dir.mkdir(parents=True, exist_ok=True)
+        builder = (
+            builder
+            .config("spark.jars.ivy", str(ivy_dir))
+            .config("spark.local.dir", str(local_dir))
+            .config("spark.sql.warehouse.dir", str(warehouse_dir))
+        )
     return configure_spark_with_delta_pip(builder).getOrCreate()
 
 
@@ -61,7 +78,7 @@ def execute_load_plan(
 
     own_spark = False
     if any(step["kind"] == "Table" for step in steps) and spark is None:
-        spark = create_delta_session()
+        spark = create_delta_session(lakehouse_root=lakehouse_root)
         own_spark = True
 
     loaded: dict = {}
@@ -237,38 +254,41 @@ def _write_delta(spark, outcome, table_path: Path, schema) -> None:
 def _struct_type(schema):
     if not schema:
         return None
-    from pyspark.sql.types import (
-        BooleanType,
-        DoubleType,
-        IntegerType,
-        LongType,
-        StringType,
-        StructField,
-        StructType,
-    )
+    from pyspark.sql.types import StructField, StructType
 
-    mapping = {
-        "string": StringType,
-        "str": StringType,
-        "varchar": StringType,
-        "text": StringType,
-        "int": IntegerType,
-        "integer": IntegerType,
-        "smallint": IntegerType,
-        "long": LongType,
-        "bigint": LongType,
-        "double": DoubleType,
-        "float": DoubleType,
-        "decimal": DoubleType,
-        "numeric": DoubleType,
-        "bool": BooleanType,
-        "boolean": BooleanType,
-    }
     fields = [
-        StructField(column, mapping.get(type_name.lower(), StringType)(), True)
+        StructField(column, _spark_data_type(type_name), True)
         for column, type_name in schema
     ]
     return StructType(fields)
+
+
+def _spark_data_type(type_name: str):
+    """Parse a Spark SQL / Delta column type string into a PySpark DataType."""
+
+    from pyspark.sql.types import _parse_datatype_string
+
+    normalized = _normalize_spark_type_name(type_name)
+    try:
+        return _parse_datatype_string(normalized)
+    except Exception as exc:
+        raise LoadError(
+            f"unrecognised Spark SQL schema type {type_name!r}; "
+            "use a Spark/Delta-compatible type such as string, int, bigint, "
+            "boolean, double, decimal(18,2), date, or timestamp"
+        ) from exc
+
+
+def _normalize_spark_type_name(type_name: str) -> str:
+    name = type_name.strip().lower()
+    aliases = {
+        "integer": "int",
+        "long": "bigint",
+        "bool": "boolean",
+    }
+    if name in aliases:
+        return aliases[name]
+    return name
 
 
 def _ensure_on_path(runtime_root: Path) -> None:

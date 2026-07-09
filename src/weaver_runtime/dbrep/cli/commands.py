@@ -110,6 +110,7 @@ def run_load(
             root,
             execute=not dry_run,
             object_filter=tuple(objects) if objects else None,
+            target_filter=target,
             include_static=include_static,
             strict=strict,
         )

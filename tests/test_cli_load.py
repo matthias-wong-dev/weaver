@@ -40,6 +40,14 @@ def test_load_is_target_only_and_reads_installed_runtime(tmp_path: Path, capsys)
     assert "T1.Stage.Record" in step_ids
 
 
+def test_load_files_target_excludes_delta_steps(tmp_path: Path, capsys) -> None:
+    weaver_path = _build(tmp_path, capsys)
+    code = main(["load", "--config", str(weaver_path), "--target", "T0_FILES", "--dry-run"])
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert [step["object_id"] for step in report["steps"]] == ["T0.Raw.Drop"]
+
+
 def test_load_does_not_read_source_repo(tmp_path: Path, capsys) -> None:
     weaver_path = _build(tmp_path, capsys)
     # Delete the source SES repo entirely; load must still work from the runtime.
@@ -67,7 +75,10 @@ def test_load_object_filter(tmp_path: Path, capsys) -> None:
     )
     assert code == 0
     report = json.loads(capsys.readouterr().out)
-    assert [step["object_id"] for step in report["steps"]] == ["T1.Stage.Record"]
+    assert [step["object_id"] for step in report["steps"]] == [
+        "T0.Raw.Drop",
+        "T1.Stage.Record",
+    ]
 
 
 def test_load_unknown_target_errors(tmp_path: Path, capsys) -> None:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
+
 import pytest
 
 from weaver_runtime.dbrep.errors import LoadError
@@ -130,6 +133,44 @@ def test_casts_declared_types() -> None:
     outcome = run_table_load([], incoming, primary_key=("record_id",), schema=SCHEMA)
     assert outcome.final_rows[0]["amount"] == 42
     assert isinstance(outcome.final_rows[0]["amount"], int)
+
+
+def test_casts_spark_sql_schema_types() -> None:
+    schema = (
+        ("record_id", "string"),
+        ("active", "boolean"),
+        ("row_count", "bigint"),
+        ("amount", "decimal(18,2)"),
+        ("reported_on", "date"),
+        ("loaded_at", "timestamp"),
+    )
+    incoming = [
+        {
+            "record_id": "r1",
+            "active": "true",
+            "row_count": "1234567890123",
+            "amount": "123.45",
+            "reported_on": "2026-07-09",
+            "loaded_at": "2026-07-09T01:02:03Z",
+        }
+    ]
+
+    outcome = run_table_load([], incoming, primary_key=("record_id",), schema=schema)
+    row = outcome.final_rows[0]
+
+    assert row["active"] is True
+    assert row["row_count"] == 1234567890123
+    assert row["amount"] == Decimal("123.45")
+    assert row["reported_on"] == date(2026, 7, 9)
+    assert row["loaded_at"] == datetime(2026, 7, 9, 1, 2, 3)
+
+
+def test_unknown_schema_type_fails_fast() -> None:
+    schema = (("record_id", "string"), ("payload", "mystery"))
+    incoming = [{"record_id": "r1", "payload": "x"}]
+
+    with pytest.raises(LoadError, match="unknown declared schema type"):
+        run_table_load([], incoming, primary_key=("record_id",), schema=schema)
 
 
 def test_three_run_behaviour_matches_fixture_expectations() -> None:

@@ -20,7 +20,10 @@ Behaviour summary:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
 from ..errors import LoadError
@@ -117,6 +120,11 @@ def _apply_schema(rows, schema, primary_key, strict_extra_columns):
 
     declared = [column for column, _ in schema]
     declared_set = set(declared)
+    unknown_types = [type_name for _, type_name in schema if not _is_supported_type(type_name)]
+    if unknown_types:
+        raise LoadError(
+            "unknown declared schema type(s): " + ", ".join(sorted(set(unknown_types)))
+        )
 
     missing_pk = [column for column in primary_key if column not in declared_set]
     if missing_pk:
@@ -199,6 +207,21 @@ def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete):
     return final, inserted, updated, deleted
 
 
+_DECIMAL_RE = re.compile(r"^(decimal|numeric)\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?$")
+
+
+def _is_supported_type(type_name: str) -> bool:
+    name = type_name.strip().lower()
+    return (
+        name in ("string", "str", "varchar", "text", "char")
+        or name in ("int", "integer", "long", "bigint", "smallint", "tinyint")
+        or name in ("double", "float", "real")
+        or name in ("bool", "boolean")
+        or name in ("date", "timestamp")
+        or bool(_DECIMAL_RE.match(name))
+    )
+
+
 def _cast(value: Any, type_name: str) -> Any:
     if value is None:
         return None
@@ -209,10 +232,14 @@ def _cast(value: Any, type_name: str) -> Any:
         if isinstance(value, bool):
             raise ValueError("bool is not an integer")
         return int(value)
-    if name in ("double", "float", "decimal", "numeric", "real"):
+    if name in ("double", "float", "real"):
         if isinstance(value, bool):
             raise ValueError("bool is not numeric")
         return float(value)
+    if _DECIMAL_RE.match(name):
+        if isinstance(value, bool):
+            raise ValueError("bool is not decimal")
+        return value if isinstance(value, Decimal) else Decimal(str(value))
     if name in ("bool", "boolean"):
         if isinstance(value, bool):
             return value
@@ -222,7 +249,23 @@ def _cast(value: Any, type_name: str) -> Any:
         if token in ("false", "0"):
             return False
         raise ValueError(f"not a boolean: {value!r}")
-    return value
+    if name == "date":
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value).strip()[:10])
+    if name == "timestamp":
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+        token = str(value).strip()
+        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    raise ValueError(f"unknown schema type: {type_name!r}")
 
 
 def _is_blank_key(row: dict, primary_key: Iterable[str]) -> bool:

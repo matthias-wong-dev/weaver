@@ -29,6 +29,7 @@ def load_target_runtime(
     *,
     execute: bool = True,
     object_filter: tuple[str, ...] | None = None,
+    target_filter: str | None = None,
     include_static: bool = False,
     strict: bool = True,
     spark=None,
@@ -46,11 +47,13 @@ def load_target_runtime(
     discovered = {obj.id: obj for obj in discover_runtime_objects(root)}
     _validate_against_manifest(discovered, manifest, hashes, strict=strict)
 
-    steps = [
-        step
-        for step in load_plan.get("steps", [])
-        if object_filter is None or step["object"] in object_filter
-    ]
+    steps = _selected_steps(
+        load_plan.get("steps", []),
+        manifest,
+        object_filter=object_filter,
+        target_filter=target_filter,
+        include_static=include_static,
+    )
 
     if not execute:
         return LoadReport(
@@ -76,6 +79,50 @@ def load_target_runtime(
         include_static=include_static,
         spark=spark,
     )
+
+
+def _selected_steps(
+    steps: list[dict],
+    manifest: dict,
+    *,
+    object_filter: tuple[str, ...] | None,
+    target_filter: str | None,
+    include_static: bool,
+) -> list[dict]:
+    manifest_by_id = {entry["id"]: entry for entry in manifest.get("objects", [])}
+    step_by_id = {step["object"]: step for step in steps}
+
+    selected = set(step_by_id)
+    if target_filter is not None:
+        selected = {
+            object_id
+            for object_id, entry in manifest_by_id.items()
+            if entry.get("target_database") == target_filter and object_id in step_by_id
+        }
+    if object_filter is not None:
+        requested = set(object_filter)
+        selected = selected & requested if target_filter is not None else requested
+
+    expanded: set[str] = set()
+
+    def visit(object_id: str) -> None:
+        if object_id in expanded:
+            return
+        entry = manifest_by_id.get(object_id)
+        if entry is None:
+            raise LoadError(f"object {object_id!r} is not present in the installed manifest")
+        for dependency in entry.get("dependencies", []):
+            dependency_id = dependency.get("id")
+            if dependency_id in step_by_id:
+                visit(dependency_id)
+        if object_id in step_by_id:
+            if include_static or not entry.get("static", False):
+                expanded.add(object_id)
+
+    for object_id in sorted(selected):
+        visit(object_id)
+
+    return [step for step in steps if step["object"] in expanded]
 
 
 def _read(root: Path, name: str) -> dict:
