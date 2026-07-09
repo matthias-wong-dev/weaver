@@ -23,6 +23,7 @@ def _build(tmp_path: Path, capsys) -> Path:
     weaver_path = write_config_files(tmp_path, servers, databases)
     write_python_folder(ses_root / "T0", "Raw", "Drop")
     write_python_table(ses_root / "T1", "Stage", "Record", deps=("T0.Raw.Drop",))
+    write_python_table(ses_root / "T1", "Mart", "RecordCurrent", deps=("Stage.Record",))
     main(["build", "--config", str(weaver_path), "--from", "T0_SES,T1_SES", "--to", "T0_FILES,T1_DELTA"])
     capsys.readouterr()
     return weaver_path
@@ -36,8 +37,7 @@ def test_load_is_target_only_and_reads_installed_runtime(tmp_path: Path, capsys)
     assert report["target"] == "T1_DELTA"
     assert report["ok"] is True
     step_ids = [step["object_id"] for step in report["steps"]]
-    assert step_ids[0] == "T0.Raw.Drop"
-    assert "T1.Stage.Record" in step_ids
+    assert step_ids == ["T1.Stage.Record", "T1.Mart.RecordCurrent"]
 
 
 def test_load_files_target_excludes_delta_steps(tmp_path: Path, capsys) -> None:
@@ -75,10 +75,7 @@ def test_load_object_filter(tmp_path: Path, capsys) -> None:
     )
     assert code == 0
     report = json.loads(capsys.readouterr().out)
-    assert [step["object_id"] for step in report["steps"]] == [
-        "T0.Raw.Drop",
-        "T1.Stage.Record",
-    ]
+    assert [step["object_id"] for step in report["steps"]] == ["T1.Stage.Record"]
 
 
 def test_load_unknown_target_errors(tmp_path: Path, capsys) -> None:

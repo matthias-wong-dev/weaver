@@ -1,7 +1,7 @@
 """Spark execution engine for target-only load.
 
-Instantiates installed object classes, runs Folder and Table steps in load-plan
-order, and applies the governed load policy to Delta tables. PySpark and Delta
+Instantiates installed object classes, runs selected Folder and Table steps in
+dependency order, and applies the governed load policy to Delta tables. PySpark and Delta
 are imported lazily so importing this module (and the whole core) stays free of
 Spark.
 """
@@ -61,8 +61,8 @@ def create_delta_session(
 def execute_load_plan(
     *,
     runtime_root,
-    manifest,
-    load_plan,
+    catalogue,
+    dictionaries,
     discovered,
     steps,
     include_static: bool = False,
@@ -72,7 +72,8 @@ def execute_load_plan(
 
     runtime_root = Path(runtime_root)
     lakehouse_root = runtime_root.parents[2]
-    manifest_by_id = {entry["id"]: entry for entry in manifest.get("objects", [])}
+    catalogue_by_id = {entry["id"]: entry for entry in catalogue.get("objects", [])}
+    schema_by_id = _schema_by_object(dictionaries.get("column", {}))
 
     _ensure_on_path(runtime_root)
 
@@ -86,7 +87,16 @@ def execute_load_plan(
     try:
         for step in steps:
             step_logs.append(
-                _run_step(step, discovered, manifest_by_id, loaded, lakehouse_root, runtime_root, spark)
+                _run_step(
+                    step,
+                    discovered,
+                    catalogue_by_id,
+                    schema_by_id,
+                    loaded,
+                    lakehouse_root,
+                    runtime_root,
+                    spark,
+                )
             )
     except LoadError:
         raise
@@ -105,15 +115,24 @@ def execute_load_plan(
     )
 
 
-def _run_step(step, discovered, manifest_by_id, loaded, lakehouse_root, runtime_root, spark) -> StepLog:
+def _run_step(
+    step,
+    discovered,
+    catalogue_by_id,
+    schema_by_id,
+    loaded,
+    lakehouse_root,
+    runtime_root,
+    spark,
+) -> StepLog:
     object_id = step["object"]
     kind = step["kind"]
     source_object = discovered[object_id]
-    entry = manifest_by_id[object_id]
+    entry = catalogue_by_id[object_id]
     materialisation = entry["materialisation"]
     log = StepLog(object_id=object_id, kind=kind, status="running")
 
-    repo = _make_repo(loaded, source_object.database, object_id)
+    repo = _make_repo(catalogue_by_id, source_object.database, object_id, lakehouse_root, spark)
 
     if kind == "Folder":
         folder = lakehouse_root / materialisation
@@ -150,6 +169,8 @@ def _run_step(step, discovered, manifest_by_id, loaded, lakehouse_root, runtime_
             metadata=source_object.metadata,
         )
         frame = _instantiate(source_object, context).read(spark)
+        schema = schema_by_id.get(object_id, source_object.metadata.schema)
+        frame = _align_frame_to_schema(frame, schema)
         incoming = [row.asDict(recursive=True) for row in frame.collect()]
         existing = _read_delta_rows(spark, table_path)
         metadata = source_object.metadata
@@ -157,11 +178,11 @@ def _run_step(step, discovered, manifest_by_id, loaded, lakehouse_root, runtime_
             existing,
             incoming,
             primary_key=metadata.primary_key,
-            schema=metadata.schema,
+            schema=schema,
             auto_delete=metadata.auto_delete,
             load_mode=metadata.load_mode,
         )
-        _write_delta(spark, outcome, table_path, metadata.schema)
+        _write_delta(spark, outcome, table_path, schema)
         write_rejects(lakehouse_root, object_id, outcome.rejected)
         loaded[object_id] = spark.read.format("delta").load(str(table_path))
 
@@ -181,16 +202,27 @@ def _run_step(step, discovered, manifest_by_id, loaded, lakehouse_root, runtime_
     return log
 
 
-def _make_repo(loaded: dict, database: str, current_id: str) -> Repo:
+def _make_repo(catalogue_by_id: dict, database: str, current_id: str, lakehouse_root: Path, spark) -> Repo:
     def resolve(key: str):
         parts = key.split(".")
         object_id = key if len(parts) >= 3 else f"{database}.{key}"
-        if object_id not in loaded:
+        entry = catalogue_by_id.get(object_id)
+        if entry is None:
             raise LoadError(
                 f"dependency {key!r} ({object_id}) required by {current_id} "
-                "was not loaded first"
+                "is not in the installed catalogue"
             )
-        return loaded[object_id]
+        path = lakehouse_root / entry["materialisation"]
+        kind = entry.get("kind")
+        if kind == "Folder":
+            return path
+        if kind == "Table":
+            if spark is None:
+                raise LoadError(f"table dependency {object_id} requires Spark")
+            return spark.read.format("delta").load(str(path))
+        if kind == "View":
+            return entry
+        raise LoadError(f"dependency {object_id} has unsupported kind {kind!r}")
 
     return Repo(resolve)
 
@@ -235,6 +267,29 @@ def _read_delta_rows(spark, table_path: Path) -> list[dict]:
     return [row.asDict(recursive=True) for row in frame.collect()]
 
 
+def _align_frame_to_schema(frame, schema):
+    if not schema:
+        return frame
+
+    from pyspark.sql import functions as F
+
+    declared_columns = [column for column, _ in schema]
+    existing_columns = set(frame.columns)
+    missing = [column for column in declared_columns if column not in existing_columns]
+    if missing:
+        raise LoadError("missing declared schema column(s): " + ", ".join(missing))
+
+    try:
+        return frame.select(
+            *[
+                F.col(column).cast(type_name).alias(column)
+                for column, type_name in schema
+            ]
+        )
+    except Exception as exc:
+        raise LoadError("failed to apply Spark SQL schema casts") from exc
+
+
 def _write_delta(spark, outcome, table_path: Path, schema) -> None:
     rows = outcome.final_rows
     if rows:
@@ -268,30 +323,34 @@ def _spark_data_type(type_name: str):
 
     from pyspark.sql.types import _parse_datatype_string
 
-    normalized = _normalize_spark_type_name(type_name)
     try:
-        return _parse_datatype_string(normalized)
+        return _parse_datatype_string(type_name)
     except Exception as exc:
         raise LoadError(
-            f"unrecognised Spark SQL schema type {type_name!r}; "
-            "use a Spark/Delta-compatible type such as string, int, bigint, "
-            "boolean, double, decimal(18,2), date, or timestamp"
+            f"failed to parse Spark SQL schema type {type_name!r}; "
+            "use a Spark/Delta-compatible type string"
         ) from exc
 
 
-def _normalize_spark_type_name(type_name: str) -> str:
-    name = type_name.strip().lower()
-    aliases = {
-        "integer": "int",
-        "long": "bigint",
-        "bool": "boolean",
+def _schema_by_object(column_dictionary: dict) -> dict[str, tuple[tuple[str, str], ...]]:
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    for entry in column_dictionary.get("columns", []):
+        object_id = entry.get("object_id")
+        column = entry.get("column")
+        type_name = entry.get("type")
+        if not object_id or not column or not type_name:
+            continue
+        grouped.setdefault(object_id, []).append(
+            (int(entry.get("ordinal", 0)), column, type_name)
+        )
+    return {
+        object_id: tuple((column, type_name) for _, column, type_name in sorted(columns))
+        for object_id, columns in grouped.items()
     }
-    if name in aliases:
-        return aliases[name]
-    return name
 
 
 def _ensure_on_path(runtime_root: Path) -> None:
-    path = str(runtime_root)
-    if path not in sys.path:
-        sys.path.insert(0, path)
+    for candidate in (runtime_root / "objects", runtime_root):
+        path = str(candidate)
+        if path not in sys.path:
+            sys.path.insert(0, path)

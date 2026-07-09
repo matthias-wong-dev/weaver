@@ -58,10 +58,10 @@ def test_install_writes_bundle_orchestrator_and_sources(tmp_path: Path) -> None:
     assert (root / "_orchestrator" / "weaver_runtime" / "dbrep" / "objects.py").is_file()
 
     # Source snapshot preserves the discoverable layout, including _ helper folders.
-    assert (root / "T0" / "Raw__Drop.py").is_file()
-    assert (root / "T1" / "Stage__Record.py").is_file()
-    assert (root / "_helpers" / "shared.py").is_file()
-    assert (root / "T1" / "_helpers" / "table_helpers.py").is_file()
+    assert (root / "objects" / "T0" / "Raw__Drop.py").is_file()
+    assert (root / "objects" / "T1" / "Stage__Record.py").is_file()
+    assert (root / "objects" / "_helpers" / "shared.py").is_file()
+    assert (root / "objects" / "T1" / "_helpers" / "table_helpers.py").is_file()
 
 
 def test_install_writes_artifacts(tmp_path: Path) -> None:
@@ -70,16 +70,32 @@ def test_install_writes_artifacts(tmp_path: Path) -> None:
     root = Path(result.hosts[0].runtime_root)
 
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    load_plan = json.loads((root / "load_plan.json").read_text(encoding="utf-8"))
-    hashes = json.loads((root / "source_hashes.json").read_text(encoding="utf-8"))
+    catalogue = json.loads((root / "catalogue.json").read_text(encoding="utf-8"))
+    load_dependency = json.loads((root / "load_dependency.json").read_text(encoding="utf-8"))
+    table_dictionary = json.loads((root / "table_dictionary.json").read_text(encoding="utf-8"))
+    column_dictionary = json.loads((root / "column_dictionary.json").read_text(encoding="utf-8"))
+    index_dictionary = json.loads((root / "index_dictionary.json").read_text(encoding="utf-8"))
+    foreign_key_dictionary = json.loads((root / "foreign_key_dictionary.json").read_text(encoding="utf-8"))
 
-    ids = {entry["id"] for entry in manifest["objects"]}
+    assert manifest["object_count"] == 3
+    assert "objects" not in manifest
+
+    ids = {entry["id"] for entry in catalogue["objects"]}
     assert ids == {"T0.Raw.Drop", "T1.Stage.Record", "T1.Mart.RecordCurrent"}
+    assert all(entry["source_hash"] for entry in catalogue["objects"])
 
-    order = [step["object"] for step in load_plan["steps"]]
-    assert order[0] == "T0.Raw.Drop"
+    assert load_dependency["objects"]["T1.Stage.Record"] == ["T0.Raw.Drop"]
+    assert load_dependency["objects"]["T1.Mart.RecordCurrent"] == ["T1.Stage.Record"]
 
-    assert set(hashes) == ids
+    assert {entry["id"] for entry in table_dictionary["tables"]} == ids
+    assert column_dictionary["columns"] == []
+    assert {entry["object_id"] for entry in index_dictionary["indexes"]} == {
+        "T1.Stage.Record",
+        "T1.Mart.RecordCurrent",
+    }
+    assert foreign_key_dictionary["foreign_keys"] == []
+    assert not (root / "load_plan.json").exists()
+    assert not (root / "source_hashes.json").exists()
 
 
 def test_install_creates_files_folder_and_marker(tmp_path: Path) -> None:
@@ -114,7 +130,7 @@ def test_installed_runtime_detects_source_hash_drift(tmp_path: Path) -> None:
     root = Path(result.hosts[0].runtime_root)
 
     # Tamper with an installed object file; hash validation must fail.
-    tampered = root / "T1" / "Stage__Record.py"
+    tampered = root / "objects" / "T1" / "Stage__Record.py"
     tampered.write_text(tampered.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
 
     from weaver_runtime.dbrep.errors import LoadError
@@ -122,3 +138,35 @@ def test_installed_runtime_detects_source_hash_drift(tmp_path: Path) -> None:
 
     with pytest.raises(LoadError, match="source hash mismatch"):
         load_target_runtime(root, execute=False)
+
+
+def test_sequential_build_merges_runtime_metadata(tmp_path: Path) -> None:
+    config, _ = _setup(tmp_path)
+
+    t0_plan = plan_build(
+        BuildRequest(
+            pairs=(BuildPair(resolve(config, "T0_SES"), resolve(config, "T0_FILES")),)
+        )
+    )
+    install_build(t0_plan, installed_at="2026-07-09T00:00:00Z")
+
+    t1_plan = plan_build(
+        BuildRequest(
+            pairs=(BuildPair(resolve(config, "T1_SES"), resolve(config, "T1_DELTA")),)
+        )
+    )
+    result = install_build(t1_plan, installed_at="2026-07-09T00:01:00Z")
+    root = Path(result.hosts[0].runtime_root)
+    catalogue = json.loads((root / "catalogue.json").read_text(encoding="utf-8"))
+    load_dependency = json.loads((root / "load_dependency.json").read_text(encoding="utf-8"))
+
+    assert {entry["id"] for entry in catalogue["objects"]} == {
+        "T0.Raw.Drop",
+        "T1.Stage.Record",
+        "T1.Mart.RecordCurrent",
+    }
+    assert (root / "objects" / "T0" / "Raw__Drop.py").is_file()
+    assert load_dependency["objects"]["T0.Raw.Drop"] == []
+    # T0 was external to the T1-only build, so it is preserved but not
+    # introduced as an implicit T1 load dependency.
+    assert load_dependency["objects"]["T1.Stage.Record"] == []

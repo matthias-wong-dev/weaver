@@ -24,8 +24,8 @@ from .environment import EnvironmentConfig
 
 RUNTIME_RELATIVE_ROOT = "Files/_weaver/runtime"
 MANIFEST_RELATIVE_PATH = "Files/_weaver/runtime/manifest.json"
-LOAD_PLAN_RELATIVE_PATH = "Files/_weaver/runtime/load_plan.json"
-SOURCE_HASHES_RELATIVE_PATH = "Files/_weaver/runtime/source_hashes.json"
+CATALOGUE_RELATIVE_PATH = "Files/_weaver/runtime/catalogue.json"
+LOAD_DEPENDENCY_RELATIVE_PATH = "Files/_weaver/runtime/load_dependency.json"
 
 
 @dataclass(frozen=True)

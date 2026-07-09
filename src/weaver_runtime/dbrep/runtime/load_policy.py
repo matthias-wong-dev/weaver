@@ -1,9 +1,9 @@
 """Governed table load policy (pure, no PySpark).
 
-This is the source of truth for Weaver's load behaviour. It operates on rows as
-plain dicts so it is fully unit-testable without Spark; the Spark engine collects
-the incoming frame, applies this policy against the existing table rows, and
-writes the result back as Delta.
+This is the source of truth for Weaver's governed write behaviour. It operates
+on rows as plain dicts so it is fully unit-testable without Spark. The Spark
+runtime projects and casts incoming frames to the declared schema before rows
+enter this policy.
 
 Behaviour summary:
 
@@ -12,7 +12,6 @@ Behaviour summary:
 * Duplicate incoming primary key -> reject the duplicated rows.
 * Missing declared schema column -> fail load.
 * Extra source column -> projected away (unless strict-extra-columns).
-* Cast failure -> reject row.
 * Primary key + not auto-delete -> upsert; missing rows remain.
 * Primary key + auto-delete -> upsert; delete missing rows, but only when the
   incoming batch has no rejects.
@@ -20,17 +19,13 @@ Behaviour summary:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
-from decimal import Decimal
-from typing import Any, Iterable, Sequence
+from typing import Iterable, Sequence
 
 from ..errors import LoadError
 from ..ses.metadata import APPEND, UPSERT
 
 REASON_MISSING_COLUMN = "missing_schema_column"
-REASON_CAST = "cast_failure"
 REASON_BLANK_PK = "blank_primary_key"
 REASON_DUPLICATE_PK = "duplicate_primary_key"
 
@@ -79,7 +74,7 @@ def run_table_load(
     primary_key = tuple(primary_key)
     input_count = len(incoming_rows)
 
-    projected, cast_rejects, columns = _apply_schema(
+    projected, columns = _apply_schema(
         incoming_rows, tuple(schema), primary_key, strict_extra_columns
     )
 
@@ -88,7 +83,7 @@ def run_table_load(
     else:
         accepted, pk_rejects = list(projected), []
 
-    rejected = cast_rejects + pk_rejects
+    rejected = pk_rejects
     has_rejects = bool(rejected)
 
     mode = (load_mode or (UPSERT if primary_key else APPEND)).lower()
@@ -116,15 +111,10 @@ def run_table_load(
 def _apply_schema(rows, schema, primary_key, strict_extra_columns):
     if not schema:
         columns = tuple(rows[0].keys()) if rows else ()
-        return list(rows), [], columns
+        return list(rows), columns
 
     declared = [column for column, _ in schema]
     declared_set = set(declared)
-    unknown_types = [type_name for _, type_name in schema if not _is_supported_type(type_name)]
-    if unknown_types:
-        raise LoadError(
-            "unknown declared schema type(s): " + ", ".join(sorted(set(unknown_types)))
-        )
 
     missing_pk = [column for column in primary_key if column not in declared_set]
     if missing_pk:
@@ -149,14 +139,8 @@ def _apply_schema(rows, schema, primary_key, strict_extra_columns):
                     "unexpected extra source column(s): " + ", ".join(sorted(extra))
                 )
 
-    good: list[dict] = []
-    rejects: list[dict] = []
-    for row in rows:
-        try:
-            good.append({column: _cast(row.get(column), type_name) for column, type_name in schema})
-        except (ValueError, TypeError):
-            rejects.append(_reject(row, REASON_CAST))
-    return good, rejects, tuple(declared)
+    projected = [{column: row.get(column) for column in declared} for row in rows]
+    return projected, tuple(declared)
 
 
 def _validate_primary_key(rows, primary_key):
@@ -205,67 +189,6 @@ def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete):
         final = list(incoming_by_key.values()) + kept
 
     return final, inserted, updated, deleted
-
-
-_DECIMAL_RE = re.compile(r"^(decimal|numeric)\s*(?:\(\s*\d+\s*,\s*\d+\s*\))?$")
-
-
-def _is_supported_type(type_name: str) -> bool:
-    name = type_name.strip().lower()
-    return (
-        name in ("string", "str", "varchar", "text", "char")
-        or name in ("int", "integer", "long", "bigint", "smallint", "tinyint")
-        or name in ("double", "float", "real")
-        or name in ("bool", "boolean")
-        or name in ("date", "timestamp")
-        or bool(_DECIMAL_RE.match(name))
-    )
-
-
-def _cast(value: Any, type_name: str) -> Any:
-    if value is None:
-        return None
-    name = type_name.strip().lower()
-    if name in ("string", "str", "varchar", "text", "char"):
-        return str(value)
-    if name in ("int", "integer", "long", "bigint", "smallint", "tinyint"):
-        if isinstance(value, bool):
-            raise ValueError("bool is not an integer")
-        return int(value)
-    if name in ("double", "float", "real"):
-        if isinstance(value, bool):
-            raise ValueError("bool is not numeric")
-        return float(value)
-    if _DECIMAL_RE.match(name):
-        if isinstance(value, bool):
-            raise ValueError("bool is not decimal")
-        return value if isinstance(value, Decimal) else Decimal(str(value))
-    if name in ("bool", "boolean"):
-        if isinstance(value, bool):
-            return value
-        token = str(value).strip().lower()
-        if token in ("true", "1"):
-            return True
-        if token in ("false", "0"):
-            return False
-        raise ValueError(f"not a boolean: {value!r}")
-    if name == "date":
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        return date.fromisoformat(str(value).strip()[:10])
-    if name == "timestamp":
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, date):
-            return datetime.combine(value, time.min)
-        token = str(value).strip()
-        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-        return parsed
-    raise ValueError(f"unknown schema type: {type_name!r}")
 
 
 def _is_blank_key(row: dict, primary_key: Iterable[str]) -> bool:

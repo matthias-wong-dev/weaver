@@ -184,11 +184,11 @@ def _read_previous_objects(plan) -> list[PreviousObject]:
         if str(root) in seen:
             continue
         seen.add(str(root))
-        manifest_path = root / "manifest.json"
-        if not manifest_path.is_file():
+        catalogue_path = root / "catalogue.json"
+        if not catalogue_path.is_file():
             continue
-        manifest = read_json(manifest_path)
-        for entry in manifest.get("objects", []):
+        catalogue = read_json(catalogue_path)
+        for entry in catalogue.get("objects", []):
             previous.append(
                 PreviousObject(
                     id=entry["id"],

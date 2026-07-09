@@ -44,6 +44,7 @@ def test_build_installs_bundle(tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["built"] == ["T0.Raw.Drop", "T1.Stage.Record"]
     assert (tmp_path / "lake" / "Files" / "_weaver" / "runtime" / "manifest.json").is_file()
+    assert (tmp_path / "lake" / "Files" / "_weaver" / "runtime" / "catalogue.json").is_file()
     assert (tmp_path / "lake" / "Files" / "T0" / "Raw" / "Drop").is_dir()
 
 
@@ -107,8 +108,8 @@ def test_manifest_subcommand_after_build(tmp_path: Path, capsys) -> None:
     code = main(["manifest", "--config", str(weaver_path), "--target", "T1_DELTA"])
     assert code == 0
     manifest = json.loads(capsys.readouterr().out)
-    ids = {entry["id"] for entry in manifest["objects"]}
-    assert ids == {"T0.Raw.Drop", "T1.Stage.Record"}
+    assert manifest["object_count"] == 2
+    assert "objects" not in manifest
 
 
 def test_prune_removes_orphaned_files_object(tmp_path: Path, capsys) -> None:

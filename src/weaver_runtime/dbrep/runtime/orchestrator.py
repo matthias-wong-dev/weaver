@@ -2,10 +2,11 @@
 
 Given an installed runtime root, the orchestrator:
 
-1. Reads ``manifest.json``, ``load_plan.json``, ``source_hashes.json``.
-2. Discovers database folders and object files structurally (ignoring ``_`` names).
-3. Validates discovery against the manifest (presence + source hashes).
-4. Runs steps in the installed load-plan order (when executing with Spark).
+1. Reads ``catalogue.json`` and ``load_dependency.json``.
+2. Discovers installed object files structurally under ``objects/``.
+3. Validates discovery against the catalogue and catalogue source hashes.
+4. Selects only catalogue objects for the requested target by default.
+5. Orders the selected set using dependency edges internal to that set.
 
 It never reads the original SES repo and never requires ``--from``.
 """
@@ -16,12 +17,17 @@ from pathlib import Path
 
 from ..build.manifest import read_json, source_hash
 from ..errors import LoadError
+from ..ses.graph import topological_order
 from ..ses.discovery import discover_runtime_objects
 from .logging import LoadReport, StepLog
 
+CATALOGUE_NAME = "catalogue.json"
+LOAD_DEPENDENCY_NAME = "load_dependency.json"
+TABLE_DICTIONARY_NAME = "table_dictionary.json"
+COLUMN_DICTIONARY_NAME = "column_dictionary.json"
+INDEX_DICTIONARY_NAME = "index_dictionary.json"
+FOREIGN_KEY_DICTIONARY_NAME = "foreign_key_dictionary.json"
 MANIFEST_NAME = "manifest.json"
-LOAD_PLAN_NAME = "load_plan.json"
-SOURCE_HASHES_NAME = "source_hashes.json"
 
 
 def load_target_runtime(
@@ -40,18 +46,25 @@ def load_target_runtime(
     if not root.is_dir():
         raise LoadError(f"runtime root does not exist: {root}")
 
-    manifest = _read(root, MANIFEST_NAME)
-    load_plan = _read(root, LOAD_PLAN_NAME)
-    hashes = _read(root, SOURCE_HASHES_NAME)
+    catalogue = _read(root, CATALOGUE_NAME)
+    load_dependency = _read(root, LOAD_DEPENDENCY_NAME)
+    dictionaries = {
+        "table": _read(root, TABLE_DICTIONARY_NAME),
+        "column": _read(root, COLUMN_DICTIONARY_NAME),
+        "index": _read(root, INDEX_DICTIONARY_NAME),
+        "foreign_key": _read(root, FOREIGN_KEY_DICTIONARY_NAME),
+        "manifest": _read_optional(root, MANIFEST_NAME, {}),
+    }
 
-    discovered = {obj.id: obj for obj in discover_runtime_objects(root)}
-    _validate_against_manifest(discovered, manifest, hashes, strict=strict)
+    objects_root = root / "objects"
+    discovered = {obj.id: obj for obj in discover_runtime_objects(objects_root)}
+    _validate_against_catalogue(root, discovered, catalogue, strict=strict)
 
-    steps = _selected_steps(
-        load_plan.get("steps", []),
-        manifest,
+    steps = select_objects_for_target(
+        catalogue,
+        load_dependency,
+        target_filter,
         object_filter=object_filter,
-        target_filter=target_filter,
         include_static=include_static,
     )
 
@@ -72,8 +85,8 @@ def load_target_runtime(
 
     return execute_load_plan(
         runtime_root=root,
-        manifest=manifest,
-        load_plan=load_plan,
+        catalogue=catalogue,
+        dictionaries=dictionaries,
         discovered=discovered,
         steps=steps,
         include_static=include_static,
@@ -81,48 +94,68 @@ def load_target_runtime(
     )
 
 
-def _selected_steps(
-    steps: list[dict],
-    manifest: dict,
+def select_objects_for_target(
+    catalogue: dict,
+    load_dependency: dict,
+    target_alias: str | None,
     *,
     object_filter: tuple[str, ...] | None,
-    target_filter: str | None,
     include_static: bool,
 ) -> list[dict]:
-    manifest_by_id = {entry["id"]: entry for entry in manifest.get("objects", [])}
-    step_by_id = {step["object"]: step for step in steps}
+    """Select loadable catalogue objects and sort selected-internal edges only."""
 
-    selected = set(step_by_id)
-    if target_filter is not None:
+    catalogue_by_id = {entry["id"]: entry for entry in catalogue.get("objects", [])}
+    loadable = {
+        object_id
+        for object_id, entry in catalogue_by_id.items()
+        if entry.get("kind") in {"Folder", "Table"}
+    }
+    if target_alias is None:
+        selected = set(loadable)
+    else:
         selected = {
             object_id
-            for object_id, entry in manifest_by_id.items()
-            if entry.get("target_database") == target_filter and object_id in step_by_id
+            for object_id, entry in catalogue_by_id.items()
+            if entry.get("target_database") == target_alias and object_id in loadable
         }
     if object_filter is not None:
-        requested = set(object_filter)
-        selected = selected & requested if target_filter is not None else requested
+        selected = selected & set(object_filter)
 
-    expanded: set[str] = set()
+    if not include_static:
+        selected = {
+            object_id
+            for object_id in selected
+            if not catalogue_by_id[object_id].get("static", False)
+        }
 
-    def visit(object_id: str) -> None:
-        if object_id in expanded:
-            return
-        entry = manifest_by_id.get(object_id)
-        if entry is None:
-            raise LoadError(f"object {object_id!r} is not present in the installed manifest")
-        for dependency in entry.get("dependencies", []):
-            dependency_id = dependency.get("id")
-            if dependency_id in step_by_id:
-                visit(dependency_id)
-        if object_id in step_by_id:
-            if include_static or not entry.get("static", False):
-                expanded.add(object_id)
+    graph = load_dependency.get("objects", {})
+    edges = [
+        (dependency_id, object_id)
+        for object_id in selected
+        for dependency_id in graph.get(object_id, [])
+        if dependency_id in selected
+    ]
+    try:
+        ordered_ids = topological_order(selected, edges)
+    except Exception as exc:
+        raise LoadError(str(exc)) from exc
 
-    for object_id in sorted(selected):
-        visit(object_id)
+    return [
+        {
+            "object": object_id,
+            "kind": catalogue_by_id[object_id]["kind"],
+            "action": _action_for(catalogue_by_id[object_id]["kind"]),
+        }
+        for object_id in ordered_ids
+    ]
 
-    return [step for step in steps if step["object"] in expanded]
+
+def _action_for(kind: str) -> str:
+    if kind == "Folder":
+        return "run_load"
+    if kind == "Table":
+        return "run_read_and_apply_policy"
+    return "skip"
 
 
 def _read(root: Path, name: str) -> dict:
@@ -132,26 +165,41 @@ def _read(root: Path, name: str) -> dict:
     return read_json(path)
 
 
-def _validate_against_manifest(discovered, manifest, hashes, *, strict: bool) -> None:
-    manifest_ids = {entry["id"] for entry in manifest.get("objects", [])}
+def _read_optional(root: Path, name: str, default: dict) -> dict:
+    path = root / name
+    if not path.is_file():
+        return default
+    return read_json(path)
 
-    missing = sorted(manifest_ids - set(discovered))
+
+def _validate_against_catalogue(root: Path, discovered, catalogue, *, strict: bool) -> None:
+    catalogue_by_id = {entry["id"]: entry for entry in catalogue.get("objects", [])}
+    catalogue_ids = set(catalogue_by_id)
+
+    missing = sorted(catalogue_ids - set(discovered))
     if missing:
         raise LoadError(
-            "installed runtime is missing manifest objects: " + ", ".join(missing)
+            "installed runtime is missing catalogue objects: " + ", ".join(missing)
         )
 
-    unknown = sorted(set(discovered) - manifest_ids)
+    unknown = sorted(set(discovered) - catalogue_ids)
     if unknown and strict:
         raise LoadError(
-            "installed runtime has objects not in the manifest: " + ", ".join(unknown)
+            "installed runtime has objects not in the catalogue: " + ", ".join(unknown)
         )
 
-    for object_id in sorted(manifest_ids):
-        expected = hashes.get(object_id)
+    for object_id in sorted(catalogue_ids):
+        entry = catalogue_by_id[object_id]
+        expected = entry.get("source_hash")
         if expected is None:
             raise LoadError(f"source hash missing for {object_id}")
-        actual = source_hash(discovered[object_id].text)
+        installed_source = entry.get("installed_source")
+        if not installed_source:
+            raise LoadError(f"installed source path missing for {object_id}")
+        source_path = root / installed_source
+        if not source_path.is_file():
+            raise LoadError(f"installed source is missing for {object_id}: {source_path}")
+        actual = source_hash(source_path.read_text(encoding="utf-8"))
         if actual != expected:
             raise LoadError(
                 f"source hash mismatch for {object_id}: installed runtime does not "

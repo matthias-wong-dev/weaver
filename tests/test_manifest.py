@@ -5,9 +5,12 @@ from pathlib import Path
 from dbrep_helpers import make_config, resolve, write_python_folder, write_python_table
 from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
 from weaver_runtime.dbrep.build.manifest import (
-    build_load_plan,
+    build_catalogue,
+    build_column_dictionary,
+    build_index_dictionary,
+    build_load_dependency,
     build_manifest,
-    build_source_hashes,
+    build_table_dictionary,
 )
 
 
@@ -25,7 +28,13 @@ def _plan(tmp_path: Path):
     }
     config = make_config(tmp_path, servers, databases)
     write_python_folder(ses_root / "T0", "Raw", "Drop")
-    write_python_table(ses_root / "T1", "Stage", "Record", deps=("T0.Raw.Drop",))
+    write_python_table(
+        ses_root / "T1",
+        "Stage",
+        "Record",
+        deps=("T0.Raw.Drop",),
+        schema_cols=(("record_id", "string"), ("amount", "decimal(18,2)")),
+    )
     write_python_table(ses_root / "T1", "Mart", "RecordCurrent", deps=("Stage.Record",))
     write_python_table(ses_root / "T1", "Mart", "Reference", primary_key="id", static=True)
     return plan_build(
@@ -38,7 +47,7 @@ def _plan(tmp_path: Path):
     )
 
 
-def test_manifest_records_objects_and_dependency_scopes(tmp_path: Path) -> None:
+def test_manifest_is_provenance_only(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     manifest = build_manifest(
         plan.objects,
@@ -52,39 +61,49 @@ def test_manifest_records_objects_and_dependency_scopes(tmp_path: Path) -> None:
 
     assert manifest["target_server"] == "Lake"
     assert manifest["runtime_root"] == "Files/_weaver/runtime"
-    assert manifest["installed_at"] == "2026-07-09T00:00:00Z"
+    assert manifest["built_at"] == "2026-07-09T00:00:00Z"
     assert manifest["weaver_version"] == "9.9.9"
+    assert manifest["object_count"] == 4
+    assert "objects" not in manifest
 
-    by_id = {entry["id"]: entry for entry in manifest["objects"]}
+
+def test_catalogue_records_objects_and_source_hashes(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    catalogue = build_catalogue(plan.objects)
+
+    by_id = {entry["id"]: entry for entry in catalogue["objects"]}
     assert by_id["T0.Raw.Drop"]["kind"] == "Folder"
     assert by_id["T0.Raw.Drop"]["materialisation"] == "Files/T0/Raw/Drop"
-    assert by_id["T1.Stage.Record"]["dependencies"] == [
-        {"id": "T0.Raw.Drop", "scope": "managed_cross_database"}
-    ]
-    assert by_id["T1.Mart.RecordCurrent"]["dependencies"] == [
-        {"id": "T1.Stage.Record", "scope": "intra_database"}
-    ]
+    assert by_id["T1.Stage.Record"]["installed_source"] == "objects/T1/Stage__Record.py"
+    assert len(by_id["T1.Stage.Record"]["source_hash"]) == 64
     assert by_id["T1.Mart.Reference"]["static"] is True
 
 
-def test_load_plan_is_topologically_sorted_and_records_static(tmp_path: Path) -> None:
+def test_load_dependency_records_graph(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    load_plan = build_load_plan(plan.objects, server="Lake", targets=["T0_FILES", "T1_DELTA"])
+    load_dependency = build_load_dependency(plan.objects)
 
-    order = [step["object"] for step in load_plan["steps"]]
-    assert order.index("T0.Raw.Drop") < order.index("T1.Stage.Record")
-    assert order.index("T1.Stage.Record") < order.index("T1.Mart.RecordCurrent")
-
-    actions = {step["object"]: step["action"] for step in load_plan["steps"]}
-    assert actions["T0.Raw.Drop"] == "run_load"
-    assert actions["T1.Stage.Record"] == "run_read_and_apply_policy"
-
-    # Static filtering is a load-time decision so --include-static can work.
-    assert "T1.Mart.Reference" in order
+    assert load_dependency["objects"]["T1.Stage.Record"] == ["T0.Raw.Drop"]
+    assert load_dependency["objects"]["T1.Mart.RecordCurrent"] == ["T1.Stage.Record"]
+    assert load_dependency["objects"]["T1.Mart.Reference"] == []
 
 
-def test_source_hashes_cover_every_object(tmp_path: Path) -> None:
+def test_dictionary_artifacts_record_metadata(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    hashes = build_source_hashes(plan.objects)
-    assert set(hashes) == {o.id for o in plan.objects}
-    assert all(len(digest) == 64 for digest in hashes.values())
+    table_dictionary = build_table_dictionary(plan.objects)
+    column_dictionary = build_column_dictionary(plan.objects)
+    index_dictionary = build_index_dictionary(plan.objects)
+
+    tables = {entry["id"]: entry for entry in table_dictionary["tables"]}
+    assert tables["T1.Mart.Reference"]["static"] is True
+    assert tables["T1.Stage.Record"]["load_mode"] == "upsert"
+
+    columns = [
+        (entry["ordinal"], entry["column"], entry["type"])
+        for entry in column_dictionary["columns"]
+        if entry["object_id"] == "T1.Stage.Record"
+    ]
+    assert columns == [(1, "record_id", "string"), (2, "amount", "decimal(18,2)")]
+
+    indexes = {entry["object_id"]: entry for entry in index_dictionary["indexes"]}
+    assert indexes["T1.Stage.Record"]["columns"] == ["record_id"]
