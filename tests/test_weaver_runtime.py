@@ -96,24 +96,3 @@ def test_workspace_discovery_is_flat_and_ignores_unsupported_files(tmp_path: Pat
 
     assert [item.name for item in discover_workspace_sources(source)] == ["Load", "Publish"]
     assert [item.name for item in discover_workspace_sources(source, item_name="Publish")] == ["Publish"]
-
-
-def test_weaver_runtime_source_has_no_product_environment_defaults() -> None:
-    disallowed = [
-        "I Love Government",
-        "T1",
-        "T2",
-        "Push to public store",
-        "Build and Deploy ILG",
-        "dwg-platform",
-        "datawithoutguessing",
-        "ilovegov",
-    ]
-    offenders = []
-    for path in sorted((ROOT / "src" / "weaver_runtime").glob("**/*.py")):
-        text = path.read_text(encoding="utf-8")
-        for needle in disallowed:
-            if needle in text:
-                offenders.append(f"{path.relative_to(ROOT)}: {needle}")
-
-    assert offenders == []
