@@ -63,7 +63,7 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
             resolved = onelake.resolve_lakehouse(
                 pairs[0].target.fabric_workspace, pairs[0].target.fabric_lakehouse
             )
-            uploaded = onelake.upload_files_tree(staging / "Files", resolved)
+            uploaded = onelake.sync_runtime_folder(staging / "Files", resolved)
             results.append(
                 FabricBuildResult(
                     targets=tuple(pair.target.alias for pair in pairs),
@@ -84,35 +84,26 @@ def load_fabric_lakehouse(
 ) -> dict:
     """Run the installed runtime in Fabric Spark via a Livy session."""
 
-    from weaver_runtime._legacy import load_script_module
+    from weaver_runtime.fabric import auth, livy
+    from weaver_runtime.fabric.settings import resolve_settings
 
-    livy = load_script_module("sparksession")
+    settings = resolve_settings()
     resolved = onelake.resolve_lakehouse(target.fabric_workspace, target.fabric_lakehouse)
-    token = livy.get_access_token()
-    sessions_url = livy.livy_sessions_url(resolved["workspace_id"], resolved["lakehouse_id"])
 
     code = _LOAD_CODE.format(
         workspace_id=resolved["workspace_id"], lakehouse_id=resolved["lakehouse_id"]
     )
-    session = livy.create_session(sessions_url, token)
-    session_url = f"{sessions_url}/{session['id']}"
-    try:
-        livy.wait_for_session_idle(session_url, token, poll_interval, timeout)
-        statement = livy.submit_statement(session_url, token, code, "pyspark")
-        final = livy.wait_for_statement(
-            f"{session_url}/statements/{statement['id']}", token, poll_interval, timeout
-        )
-    finally:
-        try:
-            livy.delete_session(session_url, token)
-        except Exception:  # pragma: no cover - cleanup best effort
-            pass
-
-    output = final.get("output") or {}
-    if output.get("status") != "ok":
-        raise LoadError(
-            f"Fabric load failed: {output.get('ename')}: {output.get('evalue')}"
-        )
+    output = livy.run_code(
+        resolved["workspace_id"],
+        resolved["lakehouse_id"],
+        auth.get_token(settings.fabric_scope),
+        code,
+        kind="pyspark",
+        api_base_url=settings.api_base_url,
+        api_version=settings.livy_api_version,
+        poll_interval=poll_interval,
+        timeout=timeout,
+    )
     report = _parse_report((output.get("data") or {}).get("text/plain", ""))
     return {
         "target": target.alias,

@@ -6,11 +6,22 @@ import argparse
 import json
 from pathlib import Path
 
-from .commands import run_build, run_discover, run_load, run_manifest, run_plan, run_wipe
+from .commands import run_build, run_generate, run_load, run_wipe
 
 
 def add_dbrep_subcommands(subcommands: argparse._SubParsersAction) -> None:
-    """Register build/load/plan/discover/manifest on the top-level parser."""
+    """Register the generate/build/load/wipe lifecycle on the top-level parser."""
+
+    generate = subcommands.add_parser(
+        "generate", help="generate deployment/runtime artifacts without applying them"
+    )
+    _config_arg(generate)
+    generate.add_argument("--from", dest="from_aliases", required=True)
+    generate.add_argument("--to", dest="to_aliases", required=True)
+    generate.add_argument("--out", type=Path)
+    generate.add_argument("--prune", action="store_true")
+    generate.add_argument("--strict", action="store_true")
+    generate.set_defaults(handler=_handle_generate)
 
     build = subcommands.add_parser("build", help="build database representations")
     _config_arg(build)
@@ -31,22 +42,6 @@ def add_dbrep_subcommands(subcommands: argparse._SubParsersAction) -> None:
     load.add_argument("--strict", action="store_true", default=True)
     load.add_argument("--no-strict", dest="strict", action="store_false")
     load.set_defaults(handler=_handle_load)
-
-    plan = subcommands.add_parser("plan", help="dry-run a build plan")
-    _config_arg(plan)
-    plan.add_argument("--from", dest="from_aliases", required=True)
-    plan.add_argument("--to", dest="to_aliases", required=True)
-    plan.set_defaults(handler=_handle_plan)
-
-    discover = subcommands.add_parser("discover", help="discover objects in a representation")
-    _config_arg(discover)
-    discover.add_argument("--database", required=True)
-    discover.set_defaults(handler=_handle_discover)
-
-    manifest = subcommands.add_parser("manifest", help="show an installed manifest")
-    _config_arg(manifest)
-    manifest.add_argument("--target", required=True)
-    manifest.set_defaults(handler=_handle_manifest)
 
     wipe = subcommands.add_parser("wipe", help="wipe a SQL/Files/Delta target's objects or materialisations")
     _config_arg(wipe)
@@ -90,16 +85,17 @@ def _handle_load(args: argparse.Namespace, passthrough: list) -> int:
     )
 
 
-def _handle_plan(args: argparse.Namespace, passthrough: list) -> int:
-    return _emit(run_plan(args.config, args.from_aliases, args.to_aliases))
-
-
-def _handle_discover(args: argparse.Namespace, passthrough: list) -> int:
-    return _emit(run_discover(args.config, args.database))
-
-
-def _handle_manifest(args: argparse.Namespace, passthrough: list) -> int:
-    return _emit(run_manifest(args.config, args.target))
+def _handle_generate(args: argparse.Namespace, passthrough: list) -> int:
+    return _emit(
+        run_generate(
+            args.config,
+            args.from_aliases,
+            args.to_aliases,
+            out=args.out,
+            prune=args.prune,
+            strict=args.strict,
+        )
+    )
 
 
 def _handle_wipe(args: argparse.Namespace, passthrough: list) -> int:

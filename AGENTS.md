@@ -7,20 +7,26 @@ runtime surfaces:
 
 - Fabric authentication and API helpers.
 - Fabric capacity control.
-- Lakehouse repository sync.
+- General OneLake folder sync + platform mirror push (no Git required).
 - Fabric workspace item deployment.
 - Fabric notebook execution.
-- Fabric Spark execution.
-- SQL execution.
-- SES package build.
+- Fabric Spark execution via Livy.
+- SQL execution against the Fabric Warehouse / SQL endpoint.
+- The `generate`/`build`/`load`/`wipe` database-representation lifecycle.
 - Configuration loading and CLI routing.
+
+The shared Fabric substrate lives under `src/weaver_runtime/fabric/`
+(`auth`, `client`, `resources`, `onelake`, `ignore`, `sync`, `livy`, `sql`,
+`settings`, `context`). New Fabric behaviour belongs there, not in `scripts/`.
 
 Weaver must stay environment-neutral. Do not add defaults for product names,
 workspace names, Lakehouse names, SQL endpoint names, repository names,
 notebook names, production endpoints, or local platform paths.
 
 Allowed defaults are generic technical values, such as Fabric API URLs,
-authentication scopes, timeouts, polling intervals, and worker counts.
+authentication scopes, Livy API version, timeouts, polling intervals, and
+degrees of parallelism. These live in `fabric/settings.py` and resolve
+CLI override -> environment config -> technical default.
 
 ## Command Surface
 
@@ -38,13 +44,19 @@ Normal product use passes configuration from the product repo:
 .venv/bin/weaver fabric capacity status --config ilovegov-dwg/etl/weaver.yaml
 .venv/bin/weaver fabric capacity resume --config ilovegov-dwg/etl/weaver.yaml
 .venv/bin/weaver fabric capacity suspend --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric lakehouse sync --config ilovegov-dwg/etl/weaver.yaml
+.venv/bin/weaver fabric onelake sync --config ilovegov-dwg/etl/weaver.yaml --source <folder> --target-folder <Files-relative folder>
+.venv/bin/weaver fabric platform push --config ilovegov-dwg/etl/weaver.yaml [--name weaver] [--dry-run]
 .venv/bin/weaver fabric workspace push --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric platform push --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric build ses --config ilovegov-dwg/etl/weaver.yaml
 .venv/bin/weaver fabric notebook run --config ilovegov-dwg/etl/weaver.yaml --name "Notebook name"
-.venv/bin/weaver fabric spark run --config ilovegov-dwg/etl/weaver.yaml --file path/to/code.py
-.venv/bin/weaver fabric sql run --config ilovegov-dwg/etl/weaver.yaml --file path/to/query.sql
+.venv/bin/weaver fabric livy submit --config ilovegov-dwg/etl/weaver.yaml --kind pyspark --file path/to/code.py
+.venv/bin/weaver fabric sql execute --config ilovegov-dwg/etl/weaver.yaml --file path/to/query.sql
+```
+
+SES create/wipe now runs through the lifecycle, not a dedicated command:
+
+```bash
+.venv/bin/weaver build --config weaver.yml --from <SES> --to <SQL>
+.venv/bin/weaver wipe  --config weaver.yml --target <SQL_or_Lakehouse_target>
 ```
 
 Legacy scripts under `scripts/` may exist as compatibility wrappers, but new
@@ -59,12 +71,16 @@ config), installs a runtime bundle + manifest + load plan under the Lakehouse
 host, and loads target-only from the installed runtime.
 
 ```bash
-../.venv/bin/weaver build  --config weaver.yml --from T0_SES,T1_SES --to T0_LOCAL_FILES,T1_LOCAL_DELTA [--prune] [--dry-run]
-../.venv/bin/weaver load   --config weaver.yml --target T1_LOCAL_DELTA
-../.venv/bin/weaver plan    --config weaver.yml --from ... --to ...
-../.venv/bin/weaver discover --config weaver.yml --database T1_SES
-../.venv/bin/weaver manifest --config weaver.yml --target T1_LOCAL_DELTA
+../.venv/bin/weaver generate --config weaver.yml --from T0_SES,T1_SES --to T0_LOCAL_FILES,T1_LOCAL_DELTA [--out DIR]
+../.venv/bin/weaver build    --config weaver.yml --from T0_SES,T1_SES --to T0_LOCAL_FILES,T1_LOCAL_DELTA [--prune] [--dry-run]
+../.venv/bin/weaver load     --config weaver.yml --target T1_LOCAL_DELTA
+../.venv/bin/weaver wipe      --config weaver.yml --target T1_LOCAL_DELTA
 ```
+
+`generate` produces concrete deployment/runtime artifacts without applying them
+(SQL targets emit source objects + a `plan.json`; Lakehouse/Fabric targets stage
+the runtime bundle under `--out` and never upload). The former public
+`plan`/`discover`/`manifest` subcommands have been removed.
 
 Rules that must hold: config uses one `env.yml` (hosts only) referenced by
 `weaver.yml` (`databases:` with per-representation `type`); dependency parsing is
@@ -90,9 +106,11 @@ Source objects for a SQL target must be `.sql`.
 ### Fabric Lakehouse backend (`dbrep/fabric`)
 
 Set `platform: fabric` on a server whose `server` is `Workspace/Lakehouse`.
-Build stages the bundle locally then uploads `Files/` to OneLake (reusing
-`scripts/sync_folder`). Load submits the bundled orchestrator to Fabric Spark via
-Livy (`scripts/sparksession`): it mounts the Lakehouse for orchestrator import +
+Build stages the bundle locally then syncs `Files/` to OneLake through the shared
+movement layer (`weaver_runtime.fabric.sync`): `Files/_weaver/runtime` syncs with
+signature diff + scoped delete (Weaver-owned), object folders sync without
+delete. Load submits the bundled orchestrator to Fabric Spark via Livy
+(`weaver_runtime.fabric.livy`): it mounts the Lakehouse for orchestrator import +
 Folder Python IO, and passes the `abfss://` OneLake path as `spark_root` for all
 Delta reads/writes (the FUSE mount cannot host Spark Delta writes). Fabric-facing
 object files must join paths with f-strings, not `pathlib.Path` (which mangles

@@ -11,14 +11,12 @@ from pathlib import Path
 
 from ..build import BuildPair, BuildRequest, format_dry_run, plan_build
 from ..build.manifest import read_json
-from ..build.planner import discover_source_objects
 from ..build.prune import PreviousObject
 from ..build.runtime_bundle import install_build
 from ..config import load_databases_config, resolve_database
 from ..config.resolution import runtime_root
 from ..errors import BuildError, LoadError
 from ..runtime.orchestrator import load_target_runtime
-from ..ses.dependencies import classify_object_dependencies
 
 
 def _load_config(config_path):
@@ -137,8 +135,147 @@ def _build_sql_targets(plan) -> list[dict]:
     return results
 
 
-def run_plan(config_path, from_arg: str, to_arg: str) -> dict:
-    return run_build(config_path, from_arg, to_arg, dry_run=True)
+def run_generate(
+    config_path,
+    from_arg: str,
+    to_arg: str,
+    *,
+    out=None,
+    prune: bool = False,
+    strict: bool = False,
+) -> dict:
+    """Generate concrete deployment/runtime artifacts without applying them.
+
+    SQL targets emit executable DDL scripts; Lakehouse targets stage the runtime
+    bundle to ``out``; Fabric targets are staged locally and never uploaded.
+    """
+
+    config = _load_config(config_path)
+    from_aliases = _split(from_arg)
+    to_aliases = _split(to_arg)
+    if not from_aliases or not to_aliases:
+        raise BuildError("--from and --to are required")
+    if len(from_aliases) != len(to_aliases):
+        raise BuildError(
+            f"--from has {len(from_aliases)} aliases but --to has {len(to_aliases)}"
+        )
+
+    pairs = tuple(
+        BuildPair(_resolve(config, source), _resolve(config, target))
+        for source, target in zip(from_aliases, to_aliases)
+    )
+    plan = plan_build(BuildRequest(pairs=pairs, prune=prune, strict=strict))
+
+    out_dir = Path(out) if out else (Path(config_path).resolve().parent / ".weaver" / "generate")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    lakehouse = _generate_lakehouse_artifacts(plan, out_dir)
+    sql = _generate_sql_scripts(plan, out_dir)
+
+    return {
+        "generated": True,
+        "out": str(out_dir),
+        "objects": list(plan.order),
+        "lakehouse": lakehouse,
+        "sql": sql,
+        "external": [external.id for external in plan.external_dependencies],
+    }
+
+
+def _generate_lakehouse_artifacts(plan, out_dir: Path) -> list[dict]:
+    """Stage the runtime bundle for each Lakehouse host locally under ``out_dir``."""
+
+    lakehouse_pairs = [pair for pair in plan.pairs if pair.target.is_lakehouse]
+    if not lakehouse_pairs:
+        return []
+
+    staged_pairs = tuple(
+        BuildPair(
+            pair.source,
+            replace(
+                pair.target,
+                host=str(out_dir / pair.target.server_alias),
+                platform="local",
+            ),
+        )
+        for pair in lakehouse_pairs
+    )
+    staged_plan = replace(plan, pairs=staged_pairs)
+    result = install_build(staged_plan)
+    return [
+        {
+            "server": host.server,
+            "objects": list(host.installed_objects),
+            "runtime_root": host.runtime_root,
+        }
+        for host in result.hosts
+    ]
+
+
+def _generate_sql_scripts(plan, out_dir: Path) -> list[dict]:
+    """Emit SQL deployment artifacts for each SQL target under ``out_dir``.
+
+    Writes each source object's SQL and a ``plan.json`` describing the ordered
+    install operations. Real backing-table shape is inferred at build time
+    against the endpoint, so nothing here executes or requires a connection.
+    """
+
+    from ..build.manifest import write_json
+    from ..targets import get_adapter
+
+    results: list[dict] = []
+    for pair in plan.pairs:
+        if not pair.target.is_sql:
+            continue
+        adapter = get_adapter("SQL")
+        objects = [obj for obj in plan.objects if obj.target_alias == pair.target.alias]
+        if not objects:
+            continue
+        ordered = [obj for obj_id in plan.order for obj in objects if obj.id == obj_id]
+
+        target_dir = out_dir / pair.target.alias
+        objects_dir = target_dir / "objects"
+        objects_dir.mkdir(parents=True, exist_ok=True)
+
+        scripts: list[str] = []
+        plan_entries: list[dict] = []
+        for obj in ordered:
+            action = adapter.plan(obj, None)
+            script_path = objects_dir / f"{obj.materialisation}.sql"
+            script_path.write_text(obj.source.text.rstrip() + "\n", encoding="utf-8")
+            scripts.append(str(script_path))
+            plan_entries.append(
+                {
+                    "id": obj.id,
+                    "kind": obj.kind,
+                    "materialisation": obj.materialisation,
+                    "operations": list(action.operations),
+                    "source": str(script_path),
+                }
+            )
+
+        plan_path = target_dir / "plan.json"
+        write_json(
+            plan_path,
+            {
+                "version": 1,
+                "target": pair.target.alias,
+                "server": pair.target.host,
+                "database": pair.target.database,
+                "objects": plan_entries,
+            },
+        )
+        results.append(
+            {
+                "target": pair.target.alias,
+                "server": pair.target.host,
+                "database": pair.target.database,
+                "objects": len(plan_entries),
+                "plan": str(plan_path),
+                "scripts": scripts,
+            }
+        )
+    return results
 
 
 def run_load(
@@ -267,42 +404,6 @@ def _wipe_lakehouse(target: str, resolved) -> dict:
         "location": location,
         "existed": existed,
     }
-
-
-def run_discover(config_path, database: str) -> dict:
-    config = _load_config(config_path)
-    resolved = _resolve(config, database)
-    objects = discover_source_objects(resolved)
-    managed = {resolved.database}
-    return {
-        "database": database,
-        "objects": [
-            {
-                "id": source_object.id,
-                "kind": source_object.kind,
-                "declared_as": source_object.declared_as,
-                "language": source_object.language,
-                "dependencies": [
-                    {"id": dependency.id, "scope": dependency.scope}
-                    for dependency in classify_object_dependencies(source_object, managed)
-                ],
-            }
-            for source_object in objects
-        ],
-    }
-
-
-def run_manifest(config_path, target: str) -> dict:
-    config = _load_config(config_path)
-    resolved = _resolve(config, target)
-    if not resolved.is_lakehouse:
-        raise LoadError(
-            f"manifest is only available for Lakehouse targets, not {resolved.type}"
-        )
-    manifest_path = runtime_root(resolved) / "manifest.json"
-    if not manifest_path.is_file():
-        raise LoadError(f"no installed manifest for target {target!r} at {manifest_path}")
-    return read_json(manifest_path)
 
 
 def _read_previous_objects(plan) -> list[PreviousObject]:
