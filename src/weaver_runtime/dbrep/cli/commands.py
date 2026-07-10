@@ -424,18 +424,38 @@ def run_load(
             payload.update(report.to_dict())
             return payload
 
-        # Execute the same generated load program the Fabric path submits.
+        # Plan the selection first (no Spark). A load that includes Table steps
+        # requires a working Spark/Delta session; fail clearly if none can be got.
+        planned = load_target_runtime(
+            root,
+            execute=False,
+            object_filter=object_filter,
+            target_filter=target,
+            include_static=include_static,
+            strict=strict,
+        )
+        needs_spark = any(step.kind == "Table" for step in planned.steps)
+
         from ..config.resolution import lakehouse_root
         from ..execution import execute_program_local
         from ..lakehouse.programs import render_load_program
 
+        spark, own_spark = (None, False)
+        if needs_spark:
+            spark, own_spark = _acquire_delta_session(lakehouse_root(resolved))
+            if spark is None:
+                raise LoadError(
+                    "local Lakehouse load of table object(s) requires a working "
+                    "Spark/Delta session, but none could be created"
+                )
+
+        # Execute the same generated load program the Fabric path submits.
         program = render_load_program(
             target_filter=target,
             object_filter=object_filter,
             include_static=include_static,
             strict=strict,
         )
-        spark, own_spark = _acquire_delta_session(lakehouse_root(resolved))
         try:
             result = execute_program_local(
                 program, spark=spark, runtime_root=root, spark_root=lakehouse_root(resolved)

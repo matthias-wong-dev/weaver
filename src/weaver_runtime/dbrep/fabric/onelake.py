@@ -97,6 +97,14 @@ def upload_files_tree(files_root: Path, resolved: dict, *, workers: int = 16) ->
     return sync_runtime_folder(files_root, resolved, degrees_of_parallelism=workers)
 
 
+def upload_file(resolved: dict, files_path: str, content: bytes) -> None:
+    """Overwrite one Lakehouse ``Files/``-relative object (e.g. a small record)."""
+
+    from ...fabric import onelake as fabric_onelake
+
+    fabric_onelake.upload_file(_target(resolved), files_path, content)
+
+
 def delete_directory(resolved: dict, relative_path: str) -> bool:
     """Recursively delete a Lakehouse directory (``Files/<db>`` / ``Tables/<db>``)."""
 

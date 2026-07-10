@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+import json
 import tempfile
 
-from ..build.manifest import write_json
 from ..lakehouse.artifacts import (
     COMPLETION_RECORD_NAME,
     completion_record,
@@ -57,7 +57,7 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
 
             result = _run_program(resolved, artifact.program)
 
-            _write_completion_record(artifact, resolved, completion_record(group, result))
+            _publish_completion_record(resolved, completion_record(group, result))
 
             results.append(
                 FabricBuildResult(
@@ -131,9 +131,11 @@ def _run_program(
     )
 
 
-def _write_completion_record(artifact, resolved, record: dict) -> None:
-    """Write the completion record into the staged runtime and upload it."""
+def _publish_completion_record(resolved, record: dict) -> None:
+    """Upload just the completion record after a successful build program.
 
-    record_path = artifact.files_root / "_weaver" / "runtime" / COMPLETION_RECORD_NAME
-    write_json(record_path, record)
-    onelake.sync_runtime_folder(artifact.files_root, resolved)
+    A single focused OneLake file write, not a second full ``Files/`` sync.
+    """
+
+    content = (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    onelake.upload_file(resolved, f"_weaver/runtime/{COMPLETION_RECORD_NAME}", content)

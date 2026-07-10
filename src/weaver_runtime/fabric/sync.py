@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import onelake
+from .client import FabricClientError
 from .ignore import IgnoreSpec, load_ignore_spec, parse_ignore_lines
 from .onelake import LakehouseTarget, OneLakeError
 from .settings import DEFAULT_DEGREES_OF_PARALLELISM
@@ -160,7 +161,8 @@ def _read_remote_signatures(target: LakehouseTarget, folder: str) -> dict[str, d
     metadata_path = "/".join(part for part in [folder, SIGNATURES_NAME] if part)
     try:
         raw = onelake.read_file(target, metadata_path)
-    except OneLakeError as exc:
+    except FabricClientError as exc:
+        # A fresh folder has no signatures file yet: treat 404 as "no signatures".
         if "returned HTTP 404" in str(exc):
             return {}
         raise
@@ -174,7 +176,8 @@ def _read_remote_signatures(target: LakehouseTarget, folder: str) -> dict[str, d
 def _list_remote_payload_paths(target: LakehouseTarget, folder: str) -> set[str]:
     try:
         remote_files = onelake.list_files(target, folder)
-    except OneLakeError as exc:
+    except FabricClientError as exc:
+        # A fresh/absent remote folder lists as 404: treat as "no remote files".
         if "returned HTTP 404" in str(exc):
             return set()
         raise

@@ -148,6 +148,35 @@ def test_calculate_diff_delete_disabled_keeps_extra() -> None:
     assert diff.delete_paths == []
 
 
+def test_fresh_folder_reads_as_empty_signatures_and_no_remote_files(monkeypatch) -> None:
+    # A fresh Lakehouse folder has no signatures.json / no listing: OneLake DFS
+    # returns 404, raised as FabricClientError. Sync must treat it as "empty",
+    # not fail the first build/upload into a new folder.
+    from weaver_runtime.fabric.client import FabricClientError
+
+    target = onelake.LakehouseTarget(
+        workspace_id="w", lakehouse_id="l", storage_token="t", onelake_base_url="https://x"
+    )
+
+    def not_found(*args, **kwargs):
+        raise FabricClientError(
+            "GET https://x/Files/T0/signatures.json returned HTTP 404: PathNotFound"
+        )
+
+    monkeypatch.setattr(onelake, "read_file", not_found)
+    monkeypatch.setattr(onelake, "list_files", not_found)
+    assert sync._read_remote_signatures(target, "T0") == {}
+    assert sync._list_remote_payload_paths(target, "T0") == set()
+
+    # Non-404 errors must still surface.
+    def server_error(*args, **kwargs):
+        raise FabricClientError("GET https://x returned HTTP 500: boom")
+
+    monkeypatch.setattr(onelake, "read_file", server_error)
+    with pytest.raises(FabricClientError, match="HTTP 500"):
+        sync._read_remote_signatures(target, "T0")
+
+
 # --- onelake urls / path safety --------------------------------------------
 
 

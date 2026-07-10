@@ -2,17 +2,18 @@
 
 Materialises missing zero-row Delta tables for the declared ``Table`` objects.
 Its work list and schemas come straight from the SES metadata carried on the
-build plan — never from the installed catalogue, which is only a completion
-watermark written last. It never instantiates a Weaver object class and never
-calls its ``read()`` / ``load()``: build must not depend on source data, and the
-schema is taken only from the declared metadata, never inferred by running code.
+build plan (via :func:`delta_specs_from_plan`) — never from source data and never
+by running an object's ``read()`` / ``load()``. The schema is taken only from the
+declared metadata.
 
 A Delta table is described by a small, JSON-serialisable spec
-(``id`` / ``materialisation`` / ``schema``) so the exact same specs and the exact
-same materialisation function are used locally and on Fabric (the specs are built
-from the plan and shipped into the Livy command). PySpark and Delta are imported
-lazily through the shared helpers in ``.load``, so importing this module stays
-free of Spark and the same schema conversion is used at build and at load.
+(``id`` / ``materialisation`` / ``schema``). The specs are rendered into the
+shared generated build program (see ``dbrep.lakehouse.programs``), so the exact
+same specs and the exact same materialisation function run locally (``exec``) and
+on Fabric (Livy). Build success is recorded separately, after the program runs,
+as ``build_complete.json``; this module does not write it. PySpark and Delta are
+imported lazily through the shared helpers in ``.load``, so importing this module
+stays free of Spark and the same schema conversion is used at build and at load.
 """
 
 from __future__ import annotations

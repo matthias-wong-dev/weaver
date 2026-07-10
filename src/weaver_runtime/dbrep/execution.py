@@ -24,6 +24,14 @@ def execute_program_local(program: str, *, spark, runtime_root, spark_root) -> d
     Adds ``<runtime_root>/_orchestrator`` to ``sys.path`` (so the program can
     import the bundled runtime), runs the exact supplied string, requires it to
     set a JSON-serialisable ``WEAVER_RESULT``, and restores ``sys.path``.
+
+    Parity note: the guarantee is that the exact same generated program string
+    runs locally and on Fabric, and that the staged ``_orchestrator`` bundle is a
+    byte-for-byte copy of the live runtime source (``install_build`` copies it;
+    a test asserts the hashes match). Because this runs in the CLI's own process,
+    ``weaver_runtime`` is usually already imported, so the program binds the live
+    package rather than the staged copy — but that copy is identical source, so
+    package-level import identity is deliberately not pursued here.
     """
 
     runtime_root = Path(runtime_root)

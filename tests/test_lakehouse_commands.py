@@ -89,7 +89,7 @@ def _fabric_config(tmp_path: Path) -> Path:
 
 
 def _mock_fabric(monkeypatch) -> dict:
-    calls: dict = {"sync": [], "programs": []}
+    calls: dict = {"sync": [], "programs": [], "uploads": []}
 
     def fake_resolve(workspace, lakehouse):
         return {
@@ -103,12 +103,16 @@ def _mock_fabric(monkeypatch) -> dict:
         calls["sync"].append(Path(files_root))
         return 7
 
+    def fake_upload(resolved, files_path, content):
+        calls["uploads"].append((files_path, content))
+
     def fake_run(resolved, program, **kwargs):
         calls["programs"].append(program)
         return {"root": "abfss://W@onelake/L", "created": ["T1.Stage.Record"], "existing": []}
 
     monkeypatch.setattr(fabric_lakehouse.onelake, "resolve_lakehouse", fake_resolve)
     monkeypatch.setattr(fabric_lakehouse.onelake, "sync_runtime_folder", fake_sync)
+    monkeypatch.setattr(fabric_lakehouse.onelake, "upload_file", fake_upload)
     monkeypatch.setattr(fabric_lakehouse, "_run_program", fake_run)
     return calls
 
@@ -128,13 +132,55 @@ def test_fabric_build_submits_one_program_and_writes_completion(tmp_path: Path, 
     fab = payload["fabric"]
     assert len(fab) == 1
     assert fab[0]["result"]["created"] == ["T1.Stage.Record"]
+    assert fab[0]["uploaded"] == 7
 
-    # Files uploaded once, then the completion record uploaded after success.
-    assert len(calls["sync"]) == 2
+    # The Files/ tree is synced exactly once; the completion record is published
+    # after success as a single focused file upload, not a second full sync.
+    assert len(calls["sync"]) == 1
+    assert len(calls["uploads"]) == 1
+    files_path, content = calls["uploads"][0]
+    assert files_path == "_weaver/runtime/build_complete.json"
+    record = json.loads(content)
+    assert record["result"]["created"] == ["T1.Stage.Record"]
+    assert record["objects"] == ["T0.Raw.Drop", "T1.Stage.Record"]
 
-    # The completion record was staged (into the temp dir, now gone) only after
-    # the program returned — proven by the second sync following the submission.
-    assert payload["fabric"][0]["uploaded"] == 7
+
+def test_local_table_load_without_spark_fails_clearly(tmp_path: Path, monkeypatch) -> None:
+    # A local load selecting Table objects must fail clearly when no Spark/Delta
+    # session can be obtained, rather than surfacing an obscure downstream error.
+    from dbrep_helpers import load_config, resolve
+    from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
+    from weaver_runtime.dbrep.build.runtime_bundle import install_build
+    import weaver_runtime.dbrep.cli.commands as commands
+    from weaver_runtime.dbrep.errors import LoadError
+
+    ses_root = tmp_path / "SES"
+    servers = {"SES_Repo": {"server": str(ses_root)}, "Lake": {"server": str(tmp_path / "lake")}}
+    databases = {
+        "T0_SES": {"type": "SES", "server": "SES_Repo", "database": "T0"},
+        "T1_SES": {"type": "SES", "server": "SES_Repo", "database": "T1"},
+        "T0_FILES": {"type": "Files", "server": "Lake", "database": "T0"},
+        "T1_DELTA": {"type": "Delta", "server": "Lake", "database": "T1"},
+    }
+    weaver_path = write_config_files(tmp_path, servers, databases)
+    _sources(ses_root)
+    config = load_config(weaver_path)
+    install_build(
+        plan_build(
+            BuildRequest(
+                pairs=(
+                    BuildPair(resolve(config, "T0_SES"), resolve(config, "T0_FILES")),
+                    BuildPair(resolve(config, "T1_SES"), resolve(config, "T1_DELTA")),
+                )
+            )
+        )
+    )
+
+    # Force "no Spark session available".
+    monkeypatch.setattr(commands, "_acquire_delta_session", lambda *a, **k: (None, False))
+
+    with pytest.raises(LoadError, match="requires a working Spark/Delta session"):
+        run_load(weaver_path, "T1_DELTA")
 
 
 def test_fabric_build_does_not_derive_specs_itself(tmp_path: Path) -> None:

@@ -239,6 +239,32 @@ def test_generate_fails_before_writes_when_schema_missing(tmp_path: Path) -> Non
     assert not (out_dir / "Lake").exists()  # no partial artifact
 
 
+def test_staged_runtime_source_matches_live_package(tmp_path: Path) -> None:
+    # Parity is at the source level: the staged _orchestrator bundle the program
+    # imports on Fabric is a byte-for-byte copy of the live runtime the local
+    # executor imports. (The exact program string is asserted elsewhere.)
+    import hashlib
+
+    import weaver_runtime.dbrep.runtime.initialise as live_initialise
+    import weaver_runtime.dbrep.runtime.load as live_load
+    import weaver_runtime.dbrep.runtime.orchestrator as live_orchestrator
+
+    _, plan = _plan(tmp_path)
+    [artifact] = generate_lakehouse_artifacts(plan, tmp_path / "gen")
+    staged = (
+        artifact.files_root / "_weaver" / "runtime" / "_orchestrator"
+        / "weaver_runtime" / "dbrep" / "runtime"
+    )
+
+    def sha(path: Path) -> str:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    for module in (live_initialise, live_load, live_orchestrator):
+        staged_file = staged / Path(module.__file__).name
+        assert staged_file.is_file()
+        assert sha(staged_file) == sha(module.__file__)
+
+
 def _extract_specs(program: str) -> list[dict]:
     # The program embeds specs as ``json.loads(<repr of a json string>)``.
     import ast

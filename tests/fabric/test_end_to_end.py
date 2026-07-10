@@ -178,13 +178,19 @@ def test_end_to_end_lakehouse_and_sql(tmp_path: Path, clean_fabric_sql, fabric_l
     ]
     assert built["fabric"][0]["lakehouse"] == fabric_lakehouse_target["lakehouse"]
 
-    # Load the Lakehouse (T0 Files + T1 Delta) in Fabric Spark. Assert on
-    # accepted rows (stable across reruns; inserts become upserts on a rerun).
+    # Loads are target-scoped (a load of one alias must not run every co-located
+    # target). Load the Files target first so the T0 Folder writes its seed CSV,
+    # then the Delta target which reads it. Assert on accepted rows (stable
+    # across reruns; inserts become upserts on a rerun).
+    files_load = run_load(weaver, "T0_FILES")
+    files_steps = {step["object_id"]: step for step in files_load["report"]["steps"]}
+    assert files_load["report"]["ok"] is True
+    assert files_steps["T0.Raw.Drop"]["status"] == "ok"
+
     lakehouse_load = run_load(weaver, "T1_DELTA")
     report = lakehouse_load["report"]
     assert report["ok"] is True
     counts = {step["object_id"]: step for step in report["steps"]}
-    assert counts["T0.Raw.Drop"]["status"] == "ok"
     assert counts["T1.Stage.Record"]["accepted"] == 3
     assert counts["T1.Mart.Aggregate"]["accepted"] == 2
 
