@@ -4,11 +4,21 @@ import json
 import shutil
 from pathlib import Path
 
-from dbrep_helpers import write_config_files, write_python_folder, write_python_table
+from dbrep_helpers import (
+    load_config,
+    resolve,
+    write_config_files,
+    write_python_folder,
+    write_python_table,
+)
 from weaver_runtime.cli import main
+from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
+from weaver_runtime.dbrep.build.runtime_bundle import install_build
 
 
 def _build(tmp_path: Path, capsys) -> Path:
+    # Install the runtime bundle directly. These are load tests: they only need
+    # the installed catalogue to select and order steps, not a Spark Delta build.
     ses_root = tmp_path / "SES"
     servers = {
         "SES_Repo": {"server": str(ses_root)},
@@ -24,8 +34,17 @@ def _build(tmp_path: Path, capsys) -> Path:
     write_python_folder(ses_root / "T0", "Raw", "Drop")
     write_python_table(ses_root / "T1", "Stage", "Record", deps=("T0.Raw.Drop",))
     write_python_table(ses_root / "T1", "Mart", "RecordCurrent", deps=("Stage.Record",))
-    main(["build", "--config", str(weaver_path), "--from", "T0_SES,T1_SES", "--to", "T0_FILES,T1_DELTA"])
-    capsys.readouterr()
+
+    config = load_config(weaver_path)
+    plan = plan_build(
+        BuildRequest(
+            pairs=(
+                BuildPair(resolve(config, "T0_SES"), resolve(config, "T0_FILES")),
+                BuildPair(resolve(config, "T1_SES"), resolve(config, "T1_DELTA")),
+            )
+        )
+    )
+    install_build(plan)
     return weaver_path
 
 

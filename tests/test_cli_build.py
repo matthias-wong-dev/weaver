@@ -28,26 +28,26 @@ def _setup(tmp_path: Path) -> Path:
     }
     weaver_path = write_config_files(tmp_path, servers, databases)
     write_python_folder(ses_root / "T0", "Raw", "Drop")
-    write_python_table(ses_root / "T1", "Stage", "Record", deps=("T0.Raw.Drop",))
+    write_python_table(
+        ses_root / "T1",
+        "Stage",
+        "Record",
+        deps=("T0.Raw.Drop",),
+        schema_cols=(("record_id", "string"), ("group_id", "string"), ("amount", "int")),
+    )
     return weaver_path
 
 
 def test_build_installs_bundle(tmp_path: Path, capsys) -> None:
+    # A Files-only build installs the bundle without needing a Spark session;
+    # local Delta materialisation is covered by the Spark test suite.
     weaver_path = _setup(tmp_path)
     code = main(
-        [
-            "build",
-            "--config",
-            str(weaver_path),
-            "--from",
-            "T0_SES,T1_SES",
-            "--to",
-            "T0_FILES,T1_DELTA",
-        ]
+        ["build", "--config", str(weaver_path), "--from", "T0_SES", "--to", "T0_FILES"]
     )
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["built"] == ["T0.Raw.Drop", "T1.Stage.Record"]
+    assert payload["built"] == ["T0.Raw.Drop"]
     assert (tmp_path / "lake" / "Files" / "_weaver" / "runtime" / "manifest.json").is_file()
     assert (tmp_path / "lake" / "Files" / "_weaver" / "runtime" / "catalogue.json").is_file()
     assert (tmp_path / "lake" / "Files" / "T0" / "Raw" / "Drop").is_dir()

@@ -37,3 +37,7 @@ class CompatibilityError(BuildError):
 
 class LoadError(WeaverError):
     """Raised when a target-only load cannot resolve installed runtime."""
+
+
+class ProgramError(WeaverError):
+    """Raised when a generated Weaver program fails to execute or return a result."""

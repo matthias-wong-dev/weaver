@@ -68,17 +68,122 @@ def run_build(
     fabric_pairs = [p for p in plan.pairs if p.target.is_lakehouse and p.target.is_fabric]
     local_plan = replace(plan, pairs=tuple(p for p in plan.pairs if p not in fabric_pairs))
 
+    # Render (and validate) each local host's build program before any side
+    # effect: a missing Delta schema fails here, before install_build or Spark.
+    host_programs = _render_local_build_programs(local_plan)
+
     previous = _read_previous_objects(local_plan) if prune else None
     result = install_build(local_plan, previous=previous)
+
+    lakehouse = _execute_local_build_programs(host_programs)
     return {
         "dry_run": False,
         "built": list(plan.order),
         "hosts": [_host_summary(host) for host in result.hosts],
+        "lakehouse": lakehouse,
         "sql": _build_sql_targets(plan),
         "fabric": _build_fabric_targets(plan, fabric_pairs),
         "pruned": [item.id for item in result.pruned],
         "external": [external.id for external in plan.external_dependencies],
     }
+
+
+def _render_local_build_programs(plan) -> list[tuple]:
+    """Render and validate the build program for each local Lakehouse host.
+
+    Returns ``(group, lakehouse_root, runtime_root, program)`` tuples. Rendering
+    validates the declared Delta schemas, so this raises before any side effect.
+    """
+
+    from ..config.resolution import lakehouse_root
+    from ..config.resolution import runtime_root as _runtime_root
+    from ..lakehouse.artifacts import group_lakehouse_objects_by_host, render_host_program
+
+    programs: list[tuple] = []
+    for group in group_lakehouse_objects_by_host(plan, fabric=False):
+        program = render_host_program(group)
+        representative = group.pairs[0].target
+        programs.append(
+            (group, lakehouse_root(representative), _runtime_root(representative), program)
+        )
+    return programs
+
+
+def _execute_local_build_programs(host_programs) -> list[dict]:
+    """Execute each rendered host build program against its local Lakehouse root.
+
+    Runs the exact generated program through the generic local executor. When a
+    host has Delta work, a working Spark/Delta session is required — build fails
+    rather than silently skipping. A completion record is written only after the
+    program succeeds. Local Lakehouse support is a test substrate, so a passing
+    local build proves the generated Spark program actually executed.
+    """
+
+    if not host_programs:
+        return []
+
+    from ..build.manifest import write_json
+    from ..execution import execute_program_local
+    from ..lakehouse.artifacts import COMPLETION_RECORD_NAME, completion_record
+
+    needs_spark = any(
+        any(pair.target.is_delta for pair in group.pairs)
+        for group, _root, _runtime_root, _program in host_programs
+    )
+    spark, own_spark = (None, False)
+    if needs_spark:
+        spark, own_spark = _acquire_delta_session(host_programs[0][1])
+        if spark is None:
+            raise BuildError(
+                "local Lakehouse Delta build requires a working Spark/Delta "
+                "session, but none could be created"
+            )
+
+    results: list[dict] = []
+    try:
+        for group, root, host_runtime_root, program in host_programs:
+            result = execute_program_local(
+                program, spark=spark, runtime_root=host_runtime_root, spark_root=root
+            )
+            write_json(
+                host_runtime_root / COMPLETION_RECORD_NAME, completion_record(group, result)
+            )
+            results.append(
+                {
+                    "server": group.server,
+                    "targets": list(group.target_aliases),
+                    "result": result,
+                }
+            )
+        return results
+    finally:
+        if own_spark and spark is not None:
+            spark.stop()
+
+
+def _acquire_delta_session(lakehouse_root=None):
+    """Return ``(session, own)`` for local program execution.
+
+    Reuses an already-active Spark session when present (``own`` False, so the
+    caller must not stop it); otherwise creates a local Delta session rooted at
+    the Lakehouse (``own`` True). Returns ``(None, False)`` when PySpark or a Java
+    runtime is unavailable.
+    """
+
+    try:
+        from pyspark.sql import SparkSession
+
+        from ..runtime.load import create_delta_session
+    except Exception:
+        return None, False
+
+    active = SparkSession.getActiveSession()
+    if active is not None:
+        return active, False
+    try:
+        return create_delta_session(lakehouse_root=lakehouse_root), True
+    except Exception:
+        return None, False
 
 
 def _build_fabric_targets(plan, fabric_pairs) -> list[dict]:
@@ -96,6 +201,7 @@ def _build_fabric_targets(plan, fabric_pairs) -> list[dict]:
             "lakehouse": result.lakehouse,
             "uploaded": result.uploaded,
             "runtime_root": result.runtime_root,
+            "result": result.result,
         }
         for result in build_fabric_lakehouse(plan, fabric_pairs)
     ]
@@ -183,32 +289,25 @@ def run_generate(
 
 
 def _generate_lakehouse_artifacts(plan, out_dir: Path) -> list[dict]:
-    """Stage the runtime bundle for each Lakehouse host locally under ``out_dir``."""
+    """Render a complete build artifact (Files + build.py + plan) per host.
 
-    lakehouse_pairs = [pair for pair in plan.pairs if pair.target.is_lakehouse]
-    if not lakehouse_pairs:
-        return []
+    Uses the same host-artifact generator that local and Fabric build apply, so
+    the generated program is the exact string both execution paths run.
+    """
 
-    staged_pairs = tuple(
-        BuildPair(
-            pair.source,
-            replace(
-                pair.target,
-                host=str(out_dir / pair.target.server_alias),
-                platform="local",
-            ),
-        )
-        for pair in lakehouse_pairs
-    )
-    staged_plan = replace(plan, pairs=staged_pairs)
-    result = install_build(staged_plan)
+    from ..lakehouse.artifacts import generate_lakehouse_artifacts
+
     return [
         {
-            "server": host.server,
-            "objects": list(host.installed_objects),
-            "runtime_root": host.runtime_root,
+            "server": artifact.server,
+            "targets": list(artifact.targets),
+            "objects": list(artifact.object_ids),
+            "root": str(artifact.root),
+            "files_root": str(artifact.files_root),
+            "build_program": str(artifact.build_program_path),
+            "plan": str(artifact.plan_path),
         }
-        for host in result.hosts
+        for artifact in generate_lakehouse_artifacts(plan, out_dir)
     ]
 
 
@@ -291,6 +390,7 @@ def run_load(
     resolved = _resolve(config, target)
 
     if resolved.is_lakehouse:
+        object_filter = tuple(objects) if objects else None
         if resolved.is_fabric:
             if dry_run:
                 return {
@@ -302,19 +402,48 @@ def run_load(
                 }
             from ..fabric.lakehouse import load_fabric_lakehouse
 
-            return load_fabric_lakehouse(resolved)
+            return load_fabric_lakehouse(
+                resolved,
+                object_filter=object_filter,
+                include_static=include_static,
+                strict=strict,
+            )
 
         root = runtime_root(resolved)
-        report = load_target_runtime(
-            root,
-            execute=not dry_run,
-            object_filter=tuple(objects) if objects else None,
+        payload = {"target": target, "runtime_root": str(root)}
+        if dry_run:
+            # Planning only: no program, no Spark — just validate + order steps.
+            report = load_target_runtime(
+                root,
+                execute=False,
+                object_filter=object_filter,
+                target_filter=target,
+                include_static=include_static,
+                strict=strict,
+            )
+            payload.update(report.to_dict())
+            return payload
+
+        # Execute the same generated load program the Fabric path submits.
+        from ..config.resolution import lakehouse_root
+        from ..execution import execute_program_local
+        from ..lakehouse.programs import render_load_program
+
+        program = render_load_program(
             target_filter=target,
+            object_filter=object_filter,
             include_static=include_static,
             strict=strict,
         )
-        payload = {"target": target, "runtime_root": str(root)}
-        payload.update(report.to_dict())
+        spark, own_spark = _acquire_delta_session(lakehouse_root(resolved))
+        try:
+            result = execute_program_local(
+                program, spark=spark, runtime_root=root, spark_root=lakehouse_root(resolved)
+            )
+        finally:
+            if own_spark and spark is not None:
+                spark.stop()
+        payload.update(result)
         return payload
 
     if resolved.is_sql:
