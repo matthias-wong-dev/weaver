@@ -256,6 +256,8 @@ def _install_sources(root: Path, source_by_db: dict) -> None:
         if legacy_destination.exists():
             shutil.rmtree(legacy_destination)
         destination = objects_root / database
+        if destination.exists():
+            shutil.rmtree(destination)
         shutil.copytree(source_root, destination, dirs_exist_ok=True, ignore=_IGNORE)
 
         shared_helpers = source_root.parent / "_helpers"
@@ -437,12 +439,21 @@ def _remove_pruned_sources(root: Path, catalogue: dict, pruned_entries: list[dic
         for entry in catalogue.get("objects", [])
         if entry.get("installed_source")
     }
+    still_installed_paths = [root / path for path in still_installed]
     for entry in pruned_entries:
         installed_source = entry.get("installed_source")
         if not installed_source or installed_source in still_installed:
             continue
         source_path = root / installed_source
         if source_path.is_file():
+            # A case-only rename can address the same file on a
+            # case-insensitive filesystem. Never unlink a source that is also
+            # the newly installed canonical source.
+            if any(
+                candidate.is_file() and source_path.samefile(candidate)
+                for candidate in still_installed_paths
+            ):
+                continue
             source_path.unlink()
 
 

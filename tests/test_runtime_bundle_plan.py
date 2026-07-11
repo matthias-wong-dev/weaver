@@ -5,7 +5,10 @@ from pathlib import Path
 
 from dbrep_helpers import make_config, resolve, write_python_folder, write_python_table
 from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
-from weaver_runtime.dbrep.build.runtime_bundle import install_build
+from weaver_runtime.dbrep.build.runtime_bundle import (
+    _remove_pruned_sources,
+    install_build,
+)
 from weaver_runtime.dbrep.config.resolution import runtime_root
 from weaver_runtime.dbrep.runtime.orchestrator import load_target_runtime
 
@@ -62,6 +65,37 @@ def test_install_writes_bundle_orchestrator_and_sources(tmp_path: Path) -> None:
     assert (root / "objects" / "T1" / "Stage__Record.py").is_file()
     assert (root / "objects" / "_helpers" / "shared.py").is_file()
     assert (root / "objects" / "T1" / "_helpers" / "table_helpers.py").is_file()
+
+
+def test_reinstall_replaces_database_source_snapshot(tmp_path: Path) -> None:
+    _, plan = _setup(tmp_path)
+    result = install_build(plan, installed_at="2026-07-09T00:00:00Z")
+    root = Path(result.hosts[0].runtime_root)
+    stale = root / "objects" / "T1" / "Stage__Record_old.py"
+    stale.write_text("# stale pre-rename source\n", encoding="utf-8")
+
+    install_build(plan, installed_at="2026-07-09T00:01:00Z")
+
+    assert not stale.exists()
+    assert (root / "objects" / "T1" / "Stage__Record.py").is_file()
+
+
+def test_prune_preserves_source_path_shared_with_canonical_object(tmp_path: Path) -> None:
+    canonical = tmp_path / "objects" / "T1" / "Stage__Record.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# canonical source\n", encoding="utf-8")
+    legacy = canonical.with_name("stage__record.py")
+    if legacy != canonical and not legacy.exists():
+        legacy.hardlink_to(canonical)
+
+    _remove_pruned_sources(
+        tmp_path,
+        {"objects": [{"installed_source": "objects/T1/Stage__Record.py"}]},
+        [{"installed_source": "objects/T1/stage__record.py"}],
+    )
+
+    assert canonical.is_file()
+    assert legacy.is_file()
 
 
 def test_install_writes_artifacts(tmp_path: Path) -> None:
