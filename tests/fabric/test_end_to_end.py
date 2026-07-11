@@ -26,17 +26,16 @@ def _write_fixture(root: Path) -> None:
             Description: Raw record drop folder.
             Lineage: Writes a fixed seed CSV into the landing folder.
             """
-            from pathlib import Path
             from weaver_runtime.dbrep.objects import Folder
 
             class Raw__Drop(Folder):
-                def load(self):
-                    target = Path(self.context.object_path)
-                    target.mkdir(parents=True, exist_ok=True)
-                    (target / "drop.csv").write_text(
-                        "record_id,group_id,amount\\nr1,A,10\\nr2,A,20\\nr3,B,30\\n",
-                        encoding="utf-8",
-                    )
+                def read(self):
+                    with self.staging_folder() as staging:
+                        (staging.path / "drop.csv").write_text(
+                            "record_id,group_id,amount\\nr1,A,10\\nr2,A,20\\nr3,B,30\\n",
+                            encoding="utf-8",
+                        )
+                    return staging, (), ()
             '''
         ),
         encoding="utf-8",
@@ -61,7 +60,7 @@ def _write_fixture(root: Path) -> None:
             class Stage__Record(Table):
                 def read(self, spark):
                     drop = self.repo["T0.Raw.Drop"]
-                    return spark.read.option("header", True).csv(f"{drop}/drop.csv")
+                    return spark.read.option("header", True).csv(f"{drop}/drop.csv"), (), ()
             '''
         ),
         encoding="utf-8",
@@ -84,7 +83,7 @@ def _write_fixture(root: Path) -> None:
                 def read(self, spark):
                     from pyspark.sql import functions as F
                     stage = self.repo["T1.Stage.Record"]
-                    return stage.groupBy("group_id").agg(F.sum("amount").alias("amount"))
+                    return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), (), ()
             '''
         ),
         encoding="utf-8",
@@ -183,16 +182,30 @@ def test_end_to_end_lakehouse_and_sql(tmp_path: Path, clean_fabric_sql, fabric_l
     # then the Delta target which reads it. Assert on accepted rows (stable
     # across reruns; inserts become upserts on a rerun).
     files_load = run_load(weaver, "T0_FILES")
-    files_steps = {step["object_id"]: step for step in files_load["report"]["steps"]}
-    assert files_load["report"]["ok"] is True
-    assert files_steps["T0.Raw.Drop"]["status"] == "ok"
+    files_report = files_load["report"]
+    files_steps = {step["object_id"]: step for step in files_report["steps"]}
+    assert files_report["ok"] is True
+    # The same generated runtime that runs locally mints a workflow id and a
+    # durable Files/_logs/<workflow_id> directory, and returns both.
+    assert files_report["workflow_id"]
+    assert files_report["log_dir"].endswith(files_report["workflow_id"])
+    assert "Files/_logs" in files_report["log_dir"]
+    drop = files_steps["T0.Raw.Drop"]
+    assert drop["status"] == "success"
+    assert drop["kind"] == "Folder"
+    assert drop["module"] == "Raw__Drop.py"  # object/module names live in the JSON
+    assert drop["crud"]["unit"] == "files"  # Folder CRUD counts files
 
     lakehouse_load = run_load(weaver, "T1_DELTA")
     report = lakehouse_load["report"]
     assert report["ok"] is True
+    assert report["workflow_id"] and report["workflow_id"] != files_report["workflow_id"]
     counts = {step["object_id"]: step for step in report["steps"]}
-    assert counts["T1.Stage.Record"]["accepted"] == 3
-    assert counts["T1.Mart.Aggregate"]["accepted"] == 2
+    # Table CRUD is counted in rows; accepted rows (stable across reruns) live in
+    # the supplementary details block.
+    assert counts["T1.Stage.Record"]["crud"]["unit"] == "rows"
+    assert counts["T1.Stage.Record"]["details"]["accepted"] == 3
+    assert counts["T1.Mart.Aggregate"]["details"]["accepted"] == 2
 
     # Load the SQL warehouse (T2) via installed stored procedures.
     sql_load = run_load(weaver, "T2_SQL")

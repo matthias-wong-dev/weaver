@@ -1,0 +1,164 @@
+# Authoring Weaver objects
+
+A Weaver object declares what it produces; Weaver owns how the change is applied,
+counted, and logged. Objects never mutate the target directly.
+
+Both object kinds share one endpoint shape: `read()` returns a three-item tuple
+of **proposed upserts, explicit deletes, and supplementary messages**.
+
+```text
+Folder.read()  -> staging_folder,    file_names_to_delete,          messages
+Table.read()   -> staging_dataframe, primary_key_values_to_delete,  messages
+
+Weaver
+    validates      the triplet
+    reconciles     upserts and deletes against the target
+    mutates        the target
+    calculates     standard CRUD
+    writes         durable workflow logs
+    captures       full errors
+    cleans         staging resources
+```
+
+## The two authoring shapes
+
+```python
+from weaver_runtime.dbrep.objects import Folder, Table
+
+
+class Source__Archive(Folder):
+    def read(self):
+        with self.staging_folder() as staging_folder:
+            download_and_prepare_files(staging_folder.path)
+
+        file_names_to_delete = ("unwanted.json",)
+        messages = ({"level": "info", "message": "Source archive refreshed"},)
+        return staging_folder, file_names_to_delete, messages
+
+
+class Sales__CustomerOrder(Table):
+    def read(self, spark):
+        staging_dataframe = build_customer_orders(spark)
+
+        primary_key_values_to_delete = (("order-17",), ("order-29",))
+        messages = ({"level": "info", "message": "Customer orders prepared"},)
+        return staging_dataframe, primary_key_values_to_delete, messages
+```
+
+The normal no-delete case for either kind is `return upserts, (), ()`.
+
+## Workflow logging
+
+Each `weaver load` invocation is one **workflow**. Weaver mints a
+`{timestamp}_{uuid}` workflow id, creates `Files/_logs/<workflow_id>/`, and
+writes one `{timestamp}_{uuid}.json` step record per executed object — the moment
+the step finishes, success or failure. Object and module names live inside the
+JSON, never in the filename. A failed step records the full structured exception
+(type, repr, message, args, traceback, cause/context, and Spark error class / SQL
+state / Java exception text where available) and is written before the error
+leaves the runtime, so earlier successful steps are always preserved.
+
+Every step carries a standard CRUD block:
+
+```text
+Folder -> unit: files    read / created / updated / deleted
+Table  -> unit: rows     read / created / updated / deleted
+```
+
+## The Folder triplet
+
+1. a **`StagingFolder`** whose leaf files are created or updated in the target;
+2. a sequence of **relative file names to delete**;
+3. optional supplementary **messages**.
+
+Inside `staging_folder.path` use ordinary Python — `pathlib`, `shutil`,
+`requests`, `zipfile`, `pandas`, plain file writes. There are no special Weaver
+file-write methods. The triplet may be returned **inside or after** the `with`
+block; both behave identically:
+
+```python
+with self.staging_folder() as staging_folder:
+    ...
+return staging_folder, (), ()
+```
+
+Weaver reconciles the staged files against the target and counts file CRUD
+(`created`/`updated`/`read`-only by size then content; `deleted` for delete names
+that existed). It scans only the staging folder and the exact target paths for
+staged files and explicit deletes — never the whole target tree.
+
+### Folder rules
+
+- **Staged files are retained output.** Temporary download pages or intermediate
+  artefacts should stay **outside** staging unless meant to persist — otherwise
+  they are counted and retained. Nested files count individually; directories are
+  never CRUD units.
+- **Deletion is explicit and normally empty.** Delete entries are exact relative
+  file names — never absolute, `..`-traversing, a glob, or a directory. A path
+  cannot be both staged and deleted.
+- **Reserved Weaver files** such as `_weaver.json` cannot be staged, replaced, or
+  deleted.
+- **Direct writes to the target are unsupported.** Do not write to
+  `self.context.object_path`; stage instead.
+
+If object code raises inside the `with` block, Weaver cleans the staging folder
+automatically; on a normal return Weaver consumes and then cleans it after
+reconciliation.
+
+## The Table triplet
+
+1. a **Spark DataFrame** of rows to insert or update;
+2. a sequence of **primary-key tuples** identifying rows to delete, in declared
+   primary-key column order;
+3. optional supplementary **messages**.
+
+```python
+# single-column primary key
+primary_key_values_to_delete = (("order-17",), ("order-29",))
+
+# composite primary key (declared order)
+primary_key_values_to_delete = (("agency-a", "2026-07"), ("agency-b", "2026-06"))
+```
+
+### One deletion authority
+
+> No primary key means no row deletion.
+
+| Primary key | Auto delete | Explicit delete tuples | Result |
+|---|---|---|---|
+| absent  | false | empty     | allowed (no deletes) |
+| absent  | false | populated | **error** |
+| absent  | true  | any       | **error** |
+| present | false | empty     | allowed (no deletes) |
+| present | false | populated | apply explicit deletes |
+| present | true  | empty     | derive automatic deletes |
+| present | true  | populated | **error** |
+
+`Auto delete: true` lets Weaver derive deletions by comparing returned keys with
+existing keys; `Auto delete: false` deletes only the explicitly returned tuples.
+A table cannot use both. Explicit delete tuples must match the primary-key arity,
+contain no null values, and are deduplicated; a key that is both staged and
+explicitly deleted is upserted (the delete is counted unmatched). Row CRUD counts
+`deleted` for rows actually removed; details add `accepted`, `rejected`,
+`auto_delete_ran`, and `explicit_delete_keys_read`/`matched`/`unmatched`.
+
+## Supplementary messages
+
+The third triplet item is a sequence of small structured mappings, identical for
+both kinds. Each message has a required `level` (`info` or `warning`), a required
+non-empty `message`, and an optional `fields` mapping — and must be
+JSON-serialisable:
+
+```python
+messages = (
+    {
+        "level": "info",
+        "message": "Source prepared",
+        "fields": {"snapshot_date": "2026-07-11"},
+    },
+)
+```
+
+Messages add operational context; they never replace or redefine the
+Weaver-owned CRUD counts. Errors are captured centrally from exceptions, not
+supplied as messages.

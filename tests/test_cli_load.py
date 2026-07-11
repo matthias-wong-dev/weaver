@@ -97,6 +97,29 @@ def test_load_object_filter(tmp_path: Path, capsys) -> None:
     assert [step["object_id"] for step in report["steps"]] == ["T1.Stage.Record"]
 
 
+def test_local_files_load_executes_and_writes_workflow_log(tmp_path: Path, capsys) -> None:
+    # A real (non-dry-run) local Files load runs the exact generated program the
+    # Fabric path submits — no Spark needed for a Folder-only target — and must
+    # return the workflow fields and write one durable log directory on disk.
+    weaver_path = _build(tmp_path, capsys)
+    capsys.readouterr()
+    code = main(["load", "--config", str(weaver_path), "--target", "T0_FILES"])
+    assert code == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is True
+    assert report["executed"] is True
+    assert report["workflow_id"]
+    assert report["log_dir"].endswith(report["workflow_id"])
+
+    steps = {step["object_id"]: step for step in report["steps"]}
+    assert steps["T0.Raw.Drop"]["status"] == "success"
+    assert steps["T0.Raw.Drop"]["kind"] == "Folder"
+    assert steps["T0.Raw.Drop"]["crud"]["unit"] == "files"
+
+    assert (tmp_path / "lake" / "Files" / "_logs" / report["workflow_id"]).is_dir()
+
+
 def test_load_unknown_target_errors(tmp_path: Path, capsys) -> None:
     weaver_path = _build(tmp_path, capsys)
     code = main(["load", "--config", str(weaver_path), "--target", "Nope", "--dry-run"])

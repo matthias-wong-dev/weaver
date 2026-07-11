@@ -47,6 +47,9 @@ class LoadOutcome:
     deleted: int
     auto_delete_ran: bool
     columns: tuple[str, ...] = ()
+    explicit_delete_keys_read: int = 0
+    explicit_delete_keys_matched: int = 0
+    explicit_delete_keys_unmatched: int = 0
 
     def counts(self) -> dict:
         return {
@@ -68,11 +71,25 @@ def run_table_load(
     auto_delete: bool = False,
     load_mode: str | None = None,
     strict_extra_columns: bool = False,
+    explicit_delete_keys: Sequence[Sequence] = (),
+    object_name: str = "",
 ) -> LoadOutcome:
-    """Apply the governed load policy and return the resulting table state."""
+    """Apply the governed load policy and return the resulting table state.
+
+    ``explicit_delete_keys`` are primary-key tuples (in declared key order) whose
+    existing rows should be removed. Deletion has exactly one authority: a table
+    without a primary key cannot delete rows, and ``auto_delete`` and explicit
+    deletes cannot be combined. All authority and key validation happens before
+    any write is planned.
+    """
 
     primary_key = tuple(primary_key)
     input_count = len(incoming_rows)
+
+    if isinstance(explicit_delete_keys, (str, bytes)):
+        raise LoadError("explicit delete keys must be a sequence of primary-key tuples")
+    explicit_provided = tuple(explicit_delete_keys or ())
+    _validate_delete_authority(primary_key, auto_delete, explicit_provided, object_name)
 
     projected, columns = _apply_schema(
         incoming_rows, tuple(schema), primary_key, strict_extra_columns
@@ -89,9 +106,14 @@ def run_table_load(
     mode = (load_mode or (UPSERT if primary_key else APPEND)).lower()
     effective_auto_delete = auto_delete and not has_rejects and mode == UPSERT and bool(primary_key)
 
-    final, inserted, updated, deleted = _plan_write(
-        list(existing_rows), accepted, primary_key, mode, effective_auto_delete
+    explicit_keys: tuple[tuple, ...] = ()
+    if primary_key and not auto_delete and explicit_provided:
+        explicit_keys = _normalise_delete_keys(explicit_provided, primary_key, object_name)
+
+    final, inserted, updated, deleted, explicit_detail = _plan_write(
+        list(existing_rows), accepted, primary_key, mode, effective_auto_delete, explicit_keys
     )
+    explicit_read, explicit_matched, explicit_unmatched = explicit_detail
 
     return LoadOutcome(
         final_rows=final,
@@ -105,7 +127,63 @@ def run_table_load(
         deleted=deleted,
         auto_delete_ran=effective_auto_delete and deleted >= 0,
         columns=columns,
+        explicit_delete_keys_read=explicit_read,
+        explicit_delete_keys_matched=explicit_matched,
+        explicit_delete_keys_unmatched=explicit_unmatched,
     )
+
+
+def _validate_delete_authority(primary_key, auto_delete, explicit_provided, object_name) -> None:
+    """Enforce the single-deletion-authority rules before any write is planned."""
+
+    label = f"Table {object_name}" if object_name else "Table"
+    if not primary_key:
+        if explicit_provided:
+            raise LoadError(
+                f"{label} returned explicit deletions, but no primary key is declared. "
+                "Explicit row deletion requires a declared primary key."
+            )
+        if auto_delete:
+            raise LoadError(
+                f"{label} has Auto delete enabled, but no primary key is declared. "
+                "Automatic row deletion requires a declared primary key."
+            )
+    elif auto_delete and explicit_provided:
+        raise LoadError(
+            f"{label} has Auto delete enabled and also returned explicit deletions. "
+            "A table must use either automatic deletion or explicit deletion, not both."
+        )
+
+
+def _normalise_delete_keys(explicit_delete_keys, primary_key, object_name) -> tuple[tuple, ...]:
+    """Validate explicit delete tuples and deduplicate identical ones.
+
+    Duplicate identical tuples are collapsed to one (the documented rule).
+    """
+
+    label = f"Table {object_name}" if object_name else "Table"
+    expected = len(primary_key)
+    normalised: list[tuple] = []
+    seen: set[tuple] = set()
+    for entry in explicit_delete_keys:
+        if not isinstance(entry, tuple):
+            raise LoadError(
+                f"{label} explicit delete keys must be tuples of primary-key values; "
+                f"got {entry!r}"
+            )
+        if len(entry) != expected:
+            raise LoadError(
+                f"{label} explicit delete tuple {entry!r} has {len(entry)} value(s); "
+                f"expected {expected} to match the primary key {primary_key}"
+            )
+        if any(value is None for value in entry):
+            raise LoadError(
+                f"{label} explicit delete tuple {entry!r} contains a null primary-key value"
+            )
+        if entry not in seen:
+            seen.add(entry)
+            normalised.append(entry)
+    return tuple(normalised)
 
 
 def _apply_schema(rows, schema, primary_key, strict_extra_columns):
@@ -166,10 +244,11 @@ def _validate_primary_key(rows, primary_key):
     return accepted, rejects
 
 
-def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete):
+def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete, explicit_keys):
+    no_explicit = (0, 0, 0)
     if not primary_key or mode == APPEND:
         final = list(existing) + list(accepted)
-        return final, len(accepted), 0, 0
+        return final, len(accepted), 0, 0, no_explicit
 
     existing_by_key = {_key(row, primary_key): row for row in existing}
     incoming_by_key = {_key(row, primary_key): row for row in accepted}
@@ -183,12 +262,29 @@ def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete):
     if effective_auto_delete:
         deleted = len(existing_keys - incoming_keys)
         final = list(incoming_by_key.values())
-    else:
-        deleted = 0
-        kept = [existing_by_key[key] for key in existing_keys - incoming_keys]
-        final = list(incoming_by_key.values()) + kept
+        return final, inserted, updated, deleted, no_explicit
 
-    return final, inserted, updated, deleted
+    if explicit_keys:
+        # Upserts are authoritative: a key that is both staged and explicitly
+        # deleted is upserted, and its delete is counted unmatched.
+        delete_set = set(explicit_keys)
+        removable = {
+            key for key in existing_keys if key in delete_set and key not in incoming_keys
+        }
+        deleted = len(removable)
+        kept = [
+            existing_by_key[key]
+            for key in existing_keys
+            if key not in incoming_keys and key not in removable
+        ]
+        final = list(incoming_by_key.values()) + kept
+        read = len(explicit_keys)
+        return final, inserted, updated, deleted, (read, deleted, read - deleted)
+
+    deleted = 0
+    kept = [existing_by_key[key] for key in existing_keys - incoming_keys]
+    final = list(incoming_by_key.values()) + kept
+    return final, inserted, updated, deleted, no_explicit
 
 
 def _is_blank_key(row: dict, primary_key: Iterable[str]) -> bool:

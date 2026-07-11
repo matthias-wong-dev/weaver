@@ -17,4 +17,4 @@ class Mart__RecordAudit(Table):
     def read(self, spark):
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")
-        return spark.read.option("header", True).csv(csv)
+        return spark.read.option("header", True).csv(csv), (), ()

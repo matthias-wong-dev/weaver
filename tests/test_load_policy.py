@@ -120,6 +120,192 @@ def test_declared_schema_projects_without_casting() -> None:
     assert outcome.final_rows[0]["amount"] == "42"
 
 
+COMPOSITE_SCHEMA = (("agency", "string"), ("period", "string"), ("amount", "int"))
+
+
+def test_explicit_single_key_delete_removes_only_named_row() -> None:
+    existing = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
+    incoming = _rows(("r2", "A", 22))
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        auto_delete=False,
+        explicit_delete_keys=(("r1",),),
+    )
+    assert _by_id(outcome) == {"r2": 22, "r3": 30}  # r1 deleted, r3 kept
+    assert outcome.deleted == 1
+    assert outcome.auto_delete_ran is False
+    assert (
+        outcome.explicit_delete_keys_read,
+        outcome.explicit_delete_keys_matched,
+        outcome.explicit_delete_keys_unmatched,
+    ) == (1, 1, 0)
+
+
+def test_explicit_composite_key_delete_follows_declared_order() -> None:
+    existing = [
+        {"agency": "a", "period": "2026-07", "amount": 1},
+        {"agency": "b", "period": "2026-06", "amount": 2},
+        {"agency": "c", "period": "2026-05", "amount": 3},
+    ]
+    incoming = [{"agency": "c", "period": "2026-05", "amount": 30}]
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=("agency", "period"),
+        schema=COMPOSITE_SCHEMA,
+        auto_delete=False,
+        explicit_delete_keys=(("a", "2026-07"), ("b", "2026-06")),
+    )
+    assert {(r["agency"], r["period"]) for r in outcome.final_rows} == {("c", "2026-05")}
+    assert outcome.deleted == 2
+    assert outcome.explicit_delete_keys_matched == 2
+
+
+def test_unmatched_explicit_delete_does_not_increment_deleted() -> None:
+    existing = _rows(("r1", "A", 10))
+    outcome = run_table_load(
+        existing,
+        [],
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        explicit_delete_keys=(("nope",),),
+    )
+    assert outcome.deleted == 0
+    assert _by_id(outcome) == {"r1": 10}
+    assert (
+        outcome.explicit_delete_keys_read,
+        outcome.explicit_delete_keys_matched,
+        outcome.explicit_delete_keys_unmatched,
+    ) == (1, 0, 1)
+
+
+def test_duplicate_explicit_delete_tuples_deduplicated() -> None:
+    existing = _rows(("r1", "A", 10), ("r2", "A", 20))
+    outcome = run_table_load(
+        existing,
+        [],
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        explicit_delete_keys=(("r1",), ("r1",)),
+    )
+    assert outcome.deleted == 1
+    assert outcome.explicit_delete_keys_read == 1  # collapsed to one unique key
+    assert _by_id(outcome) == {"r2": 20}
+
+
+def test_key_both_staged_and_explicitly_deleted_is_upserted() -> None:
+    outcome = run_table_load(
+        _rows(("r1", "A", 10)),
+        _rows(("r1", "A", 99)),
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        explicit_delete_keys=(("r1",),),
+    )
+    assert _by_id(outcome) == {"r1": 99}  # upsert wins over the delete
+    assert outcome.deleted == 0
+    assert outcome.explicit_delete_keys_unmatched == 1
+
+
+def test_null_value_in_delete_tuple_is_rejected() -> None:
+    with pytest.raises(LoadError, match="null primary-key value"):
+        run_table_load(
+            [], [], primary_key=("record_id",), schema=SCHEMA, explicit_delete_keys=((None,),)
+        )
+
+
+def test_wrong_delete_tuple_arity_is_rejected() -> None:
+    with pytest.raises(LoadError, match="expected 1"):
+        run_table_load(
+            [],
+            [],
+            primary_key=("record_id",),
+            schema=SCHEMA,
+            explicit_delete_keys=(("r1", "extra"),),
+        )
+
+
+def test_non_tuple_delete_entry_is_rejected() -> None:
+    with pytest.raises(LoadError, match="tuples of primary-key values"):
+        run_table_load(
+            [], [], primary_key=("record_id",), schema=SCHEMA, explicit_delete_keys=("r1",)
+        )
+
+
+def test_explicit_delete_without_primary_key_fails() -> None:
+    with pytest.raises(LoadError, match="Explicit row deletion requires a declared primary key"):
+        run_table_load(
+            [],
+            _rows(("r1", "A", 10)),
+            primary_key=(),
+            schema=SCHEMA,
+            explicit_delete_keys=(("r1",),),
+            object_name="Sales.CustomerOrder",
+        )
+
+
+def test_auto_delete_without_primary_key_fails() -> None:
+    with pytest.raises(LoadError, match="Automatic row deletion requires a declared primary key"):
+        run_table_load(
+            [],
+            [],
+            primary_key=(),
+            schema=SCHEMA,
+            auto_delete=True,
+            object_name="Sales.CustomerOrder",
+        )
+
+
+def test_auto_delete_with_explicit_deletes_fails() -> None:
+    with pytest.raises(LoadError, match="either automatic deletion or explicit deletion, not both"):
+        run_table_load(
+            [],
+            [],
+            primary_key=("record_id",),
+            schema=SCHEMA,
+            auto_delete=True,
+            explicit_delete_keys=(("r1",),),
+            object_name="Sales.CustomerOrder",
+        )
+
+
+def test_authority_error_names_the_table() -> None:
+    with pytest.raises(LoadError, match="Table Sales.CustomerOrder"):
+        run_table_load(
+            [], [], primary_key=(), schema=SCHEMA, auto_delete=True, object_name="Sales.CustomerOrder"
+        )
+
+
+def test_auto_delete_with_empty_explicit_still_auto_deletes() -> None:
+    existing = _rows(("r1", "A", 10), ("r2", "A", 20))
+    incoming = _rows(("r2", "A", 22))
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        auto_delete=True,
+        explicit_delete_keys=(),
+    )
+    assert outcome.auto_delete_ran is True
+    assert outcome.deleted == 1
+    assert _by_id(outcome) == {"r2": 22}
+
+
+def test_no_pk_no_auto_empty_explicit_is_append() -> None:
+    outcome = run_table_load(
+        _rows(("r1", "A", 10)),
+        _rows(("r2", "A", 20)),
+        primary_key=(),
+        schema=SCHEMA,
+        explicit_delete_keys=(),
+    )
+    assert outcome.deleted == 0
+    assert len(outcome.final_rows) == 2
+
+
 def test_three_run_behaviour_matches_fixture_expectations() -> None:
     """Mirror the plan's run 1/2/3 for auto-delete vs keep-missing tables."""
 

@@ -112,6 +112,19 @@ def test_local_lakehouse_build_and_load(tmp_path: Path, spark, monkeypatch) -> N
     assert report.ok is True
     assert report.executed is True
 
+    # One workflow directory is created under Files/_logs and reported back.
+    assert report.workflow_id
+    assert (lake / "Files" / "_logs" / report.workflow_id).is_dir()
+
+    # Standard CRUD counts: the Folder is counted in files, the Table in rows.
+    steps = {step.object_id: step for step in report.steps}
+    drop = steps["T0.Raw.Drop"]
+    assert drop.crud.unit == "files"
+    assert (drop.crud.read, drop.crud.created, drop.crud.updated) == (1, 1, 0)
+    stage_step = steps["T1.Stage.Record"]
+    assert stage_step.crud.unit == "rows"
+    assert (stage_step.crud.read, stage_step.crud.created) == (3, 3)
+
     # Folder object materialised under Files/, Delta tables under Tables/.
     assert (lake / "Files" / "T0" / "Raw" / "Drop" / "drop.csv").is_file()
 
@@ -128,6 +141,18 @@ def test_local_lakehouse_build_and_load(tmp_path: Path, spark, monkeypatch) -> N
 
     summary = spark.read.format("delta").load(str(lake / "Tables" / "T3" / "Report" / "RecordSummary"))
     assert summary.count() == 2
+
+    # A second load with changed drop.csv content: the Folder file is updated
+    # (not recreated), proving file-level CRUD reconciliation across runs.
+    csv2 = tmp_path / "run2.csv"
+    csv2.write_text("record_id,group_id,amount\nr1,A,11\nr2,A,20\nr3,B,30\n", encoding="utf-8")
+    monkeypatch.setenv("WEAVER_TEST_RUN_CSV", str(csv2))
+
+    report2 = load_target_runtime(runtime, execute=True, spark=spark)
+    assert report2.ok is True
+    assert report2.workflow_id != report.workflow_id
+    drop2 = {step.object_id: step for step in report2.steps}["T0.Raw.Drop"]
+    assert (drop2.crud.read, drop2.crud.created, drop2.crud.updated) == (1, 0, 1)
 
 
 def test_build_is_non_destructive(tmp_path: Path, spark, monkeypatch) -> None:

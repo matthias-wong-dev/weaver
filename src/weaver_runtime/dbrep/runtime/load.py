@@ -16,9 +16,26 @@ from pathlib import Path
 from ..errors import LoadError
 from ..objects import Folder, Table, View, WeaverObject
 from .context import LoadContext, Repo
+from .folders import apply_folder_result, validate_folder_triplet
 from .load_policy import run_table_load
-from .logging import LoadReport, StepLog
+from .logging import (
+    CrudCounts,
+    LoadReport,
+    StepLog,
+    crud_unit_for_kind,
+    require_triplet,
+    validate_messages,
+)
 from .rejects import write_rejects
+from .workflow_logging import (
+    create_workflow_id,
+    create_workflow_log_dir,
+    duration_ms,
+    exception_detail,
+    utc_now,
+    utc_timestamp,
+    write_step_log,
+)
 
 
 def create_delta_session(
@@ -87,6 +104,12 @@ def execute_load_plan(
 
     _ensure_on_path(runtime_root)
 
+    # One workflow per invocation: a durable log directory and an ephemeral
+    # staging root, both under the lakehouse the runtime is installed in.
+    workflow_id = create_workflow_id()
+    log_dir = create_workflow_log_dir(lakehouse_root, workflow_id)
+    staging_root = lakehouse_root / "Files" / "_weaver" / "staging" / workflow_id
+
     own_spark = False
     if any(step["kind"] == "Table" for step in steps) and spark is None:
         spark = create_delta_session(lakehouse_root=lakehouse_root)
@@ -96,6 +119,8 @@ def execute_load_plan(
     step_logs: list[StepLog] = []
     try:
         for step in steps:
+            # Each step persists its own log the moment it finishes; a failure
+            # raises after writing, so earlier successful logs are preserved.
             step_logs.append(
                 _run_step(
                     step,
@@ -107,12 +132,11 @@ def execute_load_plan(
                     spark_root,
                     runtime_root,
                     spark,
+                    workflow_id,
+                    log_dir,
+                    staging_root,
                 )
             )
-    except LoadError:
-        raise
-    except Exception as exc:  # surface object/Spark failures as LoadError, stop on failure
-        raise LoadError(str(exc)) from exc
     finally:
         if own_spark and spark is not None:
             spark.stop()
@@ -121,6 +145,8 @@ def execute_load_plan(
         runtime_root=str(runtime_root),
         executed=True,
         ok=True,
+        workflow_id=workflow_id,
+        log_dir=str(log_dir),
         steps=tuple(step_logs),
         message="load complete",
     )
@@ -136,82 +162,180 @@ def _run_step(
     spark_root,
     runtime_root,
     spark,
+    workflow_id,
+    log_dir,
+    staging_root,
 ) -> StepLog:
     object_id = step["object"]
     kind = step["kind"]
     source_object = discovered[object_id]
-    entry = catalogue_by_id[object_id]
-    materialisation = entry["materialisation"]
-    log = StepLog(object_id=object_id, kind=kind, status="running")
+    started = utc_now()
+    log = StepLog(
+        workflow_id=workflow_id,
+        timestamp=utc_timestamp(started),
+        object_id=object_id,
+        module=Path(source_object.source_path).name,
+        kind=kind,
+        status="running",
+        crud=CrudCounts(unit=crud_unit_for_kind(kind)),
+    )
 
-    repo = _make_repo(catalogue_by_id, source_object.database, object_id, spark_root, spark)
-
-    if kind == "Folder":
-        folder = lakehouse_root / materialisation
-        folder.mkdir(parents=True, exist_ok=True)
-        context = LoadContext(
-            runtime_root=runtime_root,
-            lakehouse_root=lakehouse_root,
-            object_id=object_id,
-            kind=kind,
-            materialisation=materialisation,
-            repo=repo,
-            object_path=folder,
-            spark=spark,
-            metadata=source_object.metadata,
+    try:
+        materialisation = catalogue_by_id[object_id]["materialisation"]
+        repo = _make_repo(
+            catalogue_by_id, source_object.database, object_id, spark_root, spark
         )
-        _instantiate(source_object, context).load()
-        if not folder.is_dir():
-            raise LoadError(f"folder object {object_id} did not create {folder}")
-        loaded[object_id] = folder
-        log.status = "ok"
-        return log
+        if kind == "Folder":
+            _execute_folder_step(
+                log, source_object, object_id, materialisation, repo,
+                lakehouse_root, runtime_root, spark,
+                workflow_id, log_dir, staging_root, loaded,
+            )
+            log.status = "success"
+        elif kind == "Table":
+            _execute_table_step(
+                log, source_object, object_id, materialisation, repo,
+                schema_by_id, lakehouse_root, spark_root, runtime_root, spark, loaded,
+            )
+            log.status = "success"
+        else:
+            log.status = "skipped"
+            log.details = {"message": f"unsupported kind for lakehouse load: {kind}"}
+    except Exception as exc:
+        _finish(log, started)
+        log.status = "failed"
+        log.error = exception_detail(exc)
+        write_step_log(log_dir, log)
+        raise LoadError(
+            f"load step {object_id} failed: {exc} "
+            f"(workflow {workflow_id}, logs {log_dir})"
+        ) from exc
 
-    if kind == "Table":
-        table_path = _join_root(spark_root, materialisation)
-        context = LoadContext(
-            runtime_root=runtime_root,
-            lakehouse_root=lakehouse_root,
-            object_id=object_id,
-            kind=kind,
-            materialisation=materialisation,
-            repo=repo,
-            object_path=table_path,
-            spark=spark,
-            metadata=source_object.metadata,
-        )
-        frame = _instantiate(source_object, context).read(spark)
-        schema = schema_by_id.get(object_id, source_object.metadata.schema)
-        frame = _align_frame_to_schema(frame, schema)
-        incoming = [row.asDict(recursive=True) for row in frame.collect()]
-        existing = _read_delta_rows(spark, table_path)
-        metadata = source_object.metadata
-        outcome = run_table_load(
-            existing,
-            incoming,
-            primary_key=metadata.primary_key,
-            schema=schema,
-            auto_delete=metadata.auto_delete,
-            load_mode=metadata.load_mode,
-        )
-        _write_delta(spark, outcome, table_path, schema)
-        write_rejects(lakehouse_root, object_id, outcome.rejected)
-        loaded[object_id] = spark.read.format("delta").load(str(table_path))
-
-        counts = outcome.counts()
-        log.input = counts["input"]
-        log.accepted = counts["accepted"]
-        log.rejected = counts["rejected"]
-        log.inserted = counts["inserted"]
-        log.updated = counts["updated"]
-        log.deleted = counts["deleted"]
-        log.auto_delete_ran = outcome.auto_delete_ran
-        log.status = "ok"
-        return log
-
-    log.status = "skipped"
-    log.message = f"unsupported kind for lakehouse load: {kind}"
+    _finish(log, started)
+    write_step_log(log_dir, log)
     return log
+
+
+def _finish(log: StepLog, started) -> None:
+    completed = utc_now()
+    log.completed_at = utc_timestamp(completed)
+    log.duration_ms = duration_ms(started, completed)
+
+
+def _execute_folder_step(
+    log,
+    source_object,
+    object_id,
+    materialisation,
+    repo,
+    lakehouse_root,
+    runtime_root,
+    spark,
+    workflow_id,
+    log_dir,
+    staging_root,
+    loaded,
+) -> None:
+    """Run ``Folder.read()``, validate its result, and reconcile it into place."""
+
+    destination = lakehouse_root / materialisation
+    destination.mkdir(parents=True, exist_ok=True)
+    context = LoadContext(
+        runtime_root=runtime_root,
+        lakehouse_root=lakehouse_root,
+        object_id=object_id,
+        kind="Folder",
+        materialisation=materialisation,
+        repo=repo,
+        object_path=destination,
+        spark=spark,
+        metadata=source_object.metadata,
+        workflow_id=workflow_id,
+        log_dir=log_dir,
+        staging_root=staging_root,
+    )
+    try:
+        result = _instantiate(source_object, context).read()
+        upsert_path, delete_names, messages = validate_folder_triplet(
+            result, issued=context.issued_staging(), destination=destination
+        )
+        counts = apply_folder_result(upsert_path, delete_names, destination)
+    finally:
+        context.cleanup_staging()
+
+    loaded[object_id] = destination
+    log.crud = counts
+    log.messages = messages
+
+
+def _execute_table_step(
+    log,
+    source_object,
+    object_id,
+    materialisation,
+    repo,
+    schema_by_id,
+    lakehouse_root,
+    spark_root,
+    runtime_root,
+    spark,
+    loaded,
+) -> None:
+    """Run ``Table.read()`` under the governed load policy and map to CRUD."""
+
+    table_path = _join_root(spark_root, materialisation)
+    context = LoadContext(
+        runtime_root=runtime_root,
+        lakehouse_root=lakehouse_root,
+        object_id=object_id,
+        kind="Table",
+        materialisation=materialisation,
+        repo=repo,
+        object_path=table_path,
+        spark=spark,
+        metadata=source_object.metadata,
+    )
+    result = _instantiate(source_object, context).read(spark)
+    staging_dataframe, delete_keys, messages = require_triplet(result, "Table")
+    _require_dataframe(staging_dataframe)
+    messages = validate_messages(messages)
+
+    schema = schema_by_id.get(object_id, source_object.metadata.schema)
+    frame = _align_frame_to_schema(staging_dataframe, schema)
+    incoming = [row.asDict(recursive=True) for row in frame.collect()]
+    existing = _read_delta_rows(spark, table_path)
+    metadata = source_object.metadata
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=metadata.primary_key,
+        schema=schema,
+        auto_delete=metadata.auto_delete,
+        load_mode=metadata.load_mode,
+        explicit_delete_keys=delete_keys,
+        object_name=object_id,
+    )
+    _write_delta(spark, outcome, table_path, schema)
+    write_rejects(lakehouse_root, object_id, outcome.rejected)
+    loaded[object_id] = spark.read.format("delta").load(str(table_path))
+
+    counts = outcome.counts()
+    log.crud = CrudCounts(
+        unit="rows",
+        read=counts["input"],
+        created=counts["inserted"],
+        updated=counts["updated"],
+        deleted=counts["deleted"],
+    )
+    log.messages = messages
+    log.details = {
+        "accepted": counts["accepted"],
+        "rejected": counts["rejected"],
+        "auto_delete_ran": outcome.auto_delete_ran,
+        "explicit_delete_keys_read": outcome.explicit_delete_keys_read,
+        "explicit_delete_keys_matched": outcome.explicit_delete_keys_matched,
+        "explicit_delete_keys_unmatched": outcome.explicit_delete_keys_unmatched,
+    }
 
 
 def _make_repo(catalogue_by_id: dict, database: str, current_id: str, spark_root, spark) -> Repo:
@@ -320,6 +444,18 @@ def _read_delta_rows(spark, table_path) -> list[dict]:
         return []
     frame = spark.read.format("delta").load(str(table_path))
     return [row.asDict(recursive=True) for row in frame.collect()]
+
+
+def _require_dataframe(value) -> None:
+    """Require a Table ``read()`` to stage a Spark DataFrame as its first value."""
+
+    from pyspark.sql import DataFrame
+
+    if not isinstance(value, DataFrame):
+        raise LoadError(
+            "Table.read() must return a Spark DataFrame as the first value; "
+            f"got {type(value).__name__}"
+        )
 
 
 def _align_frame_to_schema(frame, schema):

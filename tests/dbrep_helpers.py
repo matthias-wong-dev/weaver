@@ -55,7 +55,7 @@ def write_python_table(
         f"class {schema}__{obj}(Table):\n"
         f"    def read(self, spark):\n"
         f"{dep_lines}\n"
-        f"        return None\n"
+        f"        return None, (), ()\n"
     )
     path = folder / f"{schema}__{obj}.py"
     path.write_text(source, encoding="utf-8")
@@ -71,15 +71,16 @@ def write_python_folder(
 ) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     meta = [f"Folder ID: {schema}.{obj}", f"Description: {obj} folder.", f"Lineage: Writes {obj}."]
-    dep_lines = "\n".join(f'        _{i} = self.repo["{ref}"]' for i, ref in enumerate(deps))
+    dep_lines = "\n".join(f'            _{i} = self.repo["{ref}"]' for i, ref in enumerate(deps))
     if not dep_lines:
-        dep_lines = "        pass"
+        dep_lines = "            pass"
     source = _docstring(meta) + (
         "\n\nfrom weaver_runtime.dbrep.objects import Folder\n\n\n"
         f"class {schema}__{obj}(Folder):\n"
-        f"    def load(self):\n"
+        f"    def read(self):\n"
+        f"        with self.staging_folder() as staging:\n"
         f"{dep_lines}\n"
-        f"        return None\n"
+        f"        return staging, (), ()\n"
     )
     path = folder / f"{schema}__{obj}.py"
     path.write_text(source, encoding="utf-8")

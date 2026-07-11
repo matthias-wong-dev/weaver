@@ -19,7 +19,7 @@ from ..build.manifest import read_json, source_hash
 from ..errors import LoadError
 from ..ses.graph import topological_order
 from ..ses.discovery import discover_runtime_objects
-from .logging import LoadReport, StepLog
+from .logging import LoadReport, planned_step_log
 
 CATALOGUE_NAME = "catalogue.json"
 LOAD_DEPENDENCY_NAME = "load_dependency.json"
@@ -75,7 +75,11 @@ def load_target_runtime(
             executed=False,
             ok=True,
             steps=tuple(
-                StepLog(object_id=step["object"], kind=step["kind"], status="planned")
+                planned_step_log(
+                    step["object"],
+                    step["kind"],
+                    module=_module_name(discovered, step["object"]),
+                )
                 for step in steps
             ),
             message="validated installed runtime (not executed)",
@@ -154,10 +158,15 @@ def select_objects_for_target(
 
 def _action_for(kind: str) -> str:
     if kind == "Folder":
-        return "run_load"
+        return "run_read_and_sync"
     if kind == "Table":
         return "run_read_and_apply_policy"
     return "skip"
+
+
+def _module_name(discovered, object_id: str) -> str:
+    source_object = discovered.get(object_id)
+    return Path(source_object.source_path).name if source_object is not None else ""
 
 
 def _read(root: Path, name: str) -> dict:
