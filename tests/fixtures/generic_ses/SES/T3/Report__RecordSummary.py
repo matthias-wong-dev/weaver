@@ -11,7 +11,7 @@ Schema:
 from weaver_runtime.dbrep.objects import Table
 
 
-class ReportRecordSummary(Table):
+class Report__RecordSummary(Table):
     def read(self, spark):
         aggregate = self.repo["T2.Mart.RecordAggregate"]
         return aggregate.select("group_id", "amount")

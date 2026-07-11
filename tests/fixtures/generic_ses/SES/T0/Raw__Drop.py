@@ -11,7 +11,7 @@ from pathlib import Path
 from weaver_runtime.dbrep.objects import Folder
 
 
-class RawDrop(Folder):
+class Raw__Drop(Folder):
     def load(self):
         target = Path(self.context.object_path)
         target.mkdir(parents=True, exist_ok=True)

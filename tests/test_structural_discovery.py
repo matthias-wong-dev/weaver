@@ -16,7 +16,8 @@ from weaver_runtime.dbrep.ses.discovery import (
 )
 
 
-def _python_object(schema: str, obj: str, *, extra: str = "") -> str:
+def _python_object(schema: str, obj: str, *, extra: str = "", class_name: str | None = None) -> str:
+    cls = class_name if class_name is not None else f"{schema}__{obj}"
     return textwrap.dedent(
         f'''
         """
@@ -27,14 +28,18 @@ def _python_object(schema: str, obj: str, *, extra: str = "") -> str:
         {extra}
         """
 
-        class {schema}{obj}:
+        from weaver_runtime.dbrep.objects import Table
+
+
+        class {cls}(Table):
             def read(self, spark):
                 return None
         '''
     )
 
 
-def _folder_object(schema: str, obj: str) -> str:
+def _folder_object(schema: str, obj: str, *, class_name: str | None = None) -> str:
+    cls = class_name if class_name is not None else f"{schema}__{obj}"
     return textwrap.dedent(
         f'''
         """
@@ -43,7 +48,10 @@ def _folder_object(schema: str, obj: str) -> str:
         Lineage: Writes {obj}.
         """
 
-        class {schema}{obj}:
+        from weaver_runtime.dbrep.objects import Folder
+
+
+        class {cls}(Folder):
             def load(self):
                 return None
         '''
@@ -160,3 +168,118 @@ def test_duplicate_object_across_python_and_sql_rejected(tmp_path: Path) -> None
     )
     with pytest.raises(DiscoveryError, match="duplicate object"):
         discover_database(database, "T1")
+
+
+# --- Python object class-name validation (Schema__Object convention) --------
+
+
+def _write(database: Path, source: str) -> Path:
+    database.mkdir(parents=True, exist_ok=True)
+    path = database / "Stage__Record.py"
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_python_class_name_matching_stem_succeeds(tmp_path: Path) -> None:
+    path = _write(tmp_path / "T1", _python_object("Stage", "Record"))
+    obj = load_source_object(path, "T1")
+    assert obj.id == "T1.Stage.Record"
+
+
+def test_folder_class_name_matching_stem_succeeds(tmp_path: Path) -> None:
+    database = tmp_path / "T0"
+    database.mkdir()
+    path = database / "Raw__Drop.py"
+    path.write_text(_folder_object("Raw", "Drop"), encoding="utf-8")
+    obj = load_source_object(path, "T0")
+    assert obj.id == "T0.Raw.Drop"
+
+
+@pytest.mark.parametrize("bad_class", ["StageRecord", "Record", "Stage_Record", "stage__record"])
+def test_python_class_name_mismatch_is_rejected(tmp_path: Path, bad_class: str) -> None:
+    path = _write(tmp_path / "T1", _python_object("Stage", "Record", class_name=bad_class))
+    with pytest.raises(DiscoveryError) as excinfo:
+        load_source_object(path, "T1")
+    message = str(excinfo.value)
+    assert "Stage__Record" in message  # expected class name reported
+    assert bad_class in message  # discovered class name reported
+
+
+def test_two_weaver_object_classes_rejected(tmp_path: Path) -> None:
+    source = textwrap.dedent(
+        '''
+        """
+        Table ID: Stage.Record
+        Description: x.
+        Lineage: y.
+        Primary key: record_id
+        """
+
+        from weaver_runtime.dbrep.objects import Table
+
+
+        class Stage__Record(Table):
+            def read(self, spark):
+                return None
+
+
+        class Extra__Thing(Table):
+            def read(self, spark):
+                return None
+        '''
+    )
+    path = _write(tmp_path / "T1", source)
+    with pytest.raises(DiscoveryError) as excinfo:
+        load_source_object(path, "T1")
+    message = str(excinfo.value)
+    assert "exactly one" in message
+    assert "Stage__Record" in message and "Extra__Thing" in message
+
+
+def test_no_weaver_object_class_rejected(tmp_path: Path) -> None:
+    source = textwrap.dedent(
+        '''
+        """
+        Table ID: Stage.Record
+        Description: x.
+        Lineage: y.
+        Primary key: record_id
+        """
+
+        class NotAnObject:
+            pass
+        '''
+    )
+    path = _write(tmp_path / "T1", source)
+    with pytest.raises(DiscoveryError) as excinfo:
+        load_source_object(path, "T1")
+    message = str(excinfo.value)
+    assert "Stage__Record" in message
+    assert "none" in message
+
+
+def test_helper_classes_plus_one_object_class_succeeds(tmp_path: Path) -> None:
+    source = textwrap.dedent(
+        '''
+        """
+        Table ID: Stage.Record
+        Description: x.
+        Lineage: y.
+        Primary key: record_id
+        """
+
+        from weaver_runtime.dbrep.objects import Table
+
+
+        class _Helper:
+            VALUE = 1
+
+
+        class Stage__Record(Table):
+            def read(self, spark):
+                helper = _Helper()
+                return helper.VALUE
+        '''
+    )
+    path = _write(tmp_path / "T1", source)
+    assert load_source_object(path, "T1").id == "T1.Stage.Record"

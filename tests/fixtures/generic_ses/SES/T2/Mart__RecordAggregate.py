@@ -11,7 +11,7 @@ Schema:
 from weaver_runtime.dbrep.objects import Table
 
 
-class MartRecordAggregate(Table):
+class Mart__RecordAggregate(Table):
     def read(self, spark):
         from pyspark.sql import functions as F
 

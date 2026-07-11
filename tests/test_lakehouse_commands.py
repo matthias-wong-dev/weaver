@@ -127,7 +127,9 @@ def test_fabric_build_submits_one_program_and_writes_completion(tmp_path: Path, 
     assert len(calls["programs"]) == 1
     program = calls["programs"][0]
     assert "initialise_delta_tables" in program
-    assert "Tables/T1/Stage.Record" in program
+    # Fabric materialisation omits the database dir: Tables/<schema>/<object>.
+    assert "Tables/Stage/Record" in program
+    assert "Tables/T1/" not in program
 
     fab = payload["fabric"]
     assert len(fab) == 1

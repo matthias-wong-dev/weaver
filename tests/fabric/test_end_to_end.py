@@ -29,7 +29,7 @@ def _write_fixture(root: Path) -> None:
             from pathlib import Path
             from weaver_runtime.dbrep.objects import Folder
 
-            class RawDrop(Folder):
+            class Raw__Drop(Folder):
                 def load(self):
                     target = Path(self.context.object_path)
                     target.mkdir(parents=True, exist_ok=True)
@@ -58,7 +58,7 @@ def _write_fixture(root: Path) -> None:
             """
             from weaver_runtime.dbrep.objects import Table
 
-            class StageRecord(Table):
+            class Stage__Record(Table):
                 def read(self, spark):
                     drop = self.repo["T0.Raw.Drop"]
                     return spark.read.option("header", True).csv(f"{drop}/drop.csv")
@@ -80,7 +80,7 @@ def _write_fixture(root: Path) -> None:
             """
             from weaver_runtime.dbrep.objects import Table
 
-            class MartAggregate(Table):
+            class Mart__Aggregate(Table):
                 def read(self, spark):
                     from pyspark.sql import functions as F
                     stage = self.repo["T1.Stage.Record"]

@@ -59,10 +59,10 @@ def test_three_run_load_behaviour(tmp_path: Path, spark, monkeypatch) -> None:
 
     lake = tmp_path / "lake"
     runtime = lake / "Files" / "_weaver" / "runtime"
-    auto = lake / "Tables" / "T1" / "Mart.RecordCurrentAuto"
-    keep = lake / "Tables" / "T1" / "Mart.RecordCurrentKeep"
-    audit = lake / "Tables" / "T1" / "Mart.RecordAudit"
-    aggregate = lake / "Tables" / "T2" / "Mart.RecordAggregate"
+    auto = lake / "Tables" / "T1" / "Mart" / "RecordCurrentAuto"
+    keep = lake / "Tables" / "T1" / "Mart" / "RecordCurrentKeep"
+    audit = lake / "Tables" / "T1" / "Mart" / "RecordAudit"
+    aggregate = lake / "Tables" / "T2" / "Mart" / "RecordAggregate"
     rejects = lake / "Files" / "_weaver" / "logs" / "rejects"
 
     def run(content: str):

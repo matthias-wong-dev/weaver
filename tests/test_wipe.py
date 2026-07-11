@@ -46,9 +46,9 @@ def _materialise(lake: Path) -> None:
     (lake / "Files" / "T0" / "Raw" / "Drop" / "_weaver.json").write_text("{}", encoding="utf-8")
     (lake / "Files" / "_weaver" / "runtime").mkdir(parents=True)
     (lake / "Files" / "_weaver" / "runtime" / "catalogue.json").write_text("{}", encoding="utf-8")
-    # Delta materialisation.
-    (lake / "Tables" / "T1" / "Stage.Record" / "_delta_log").mkdir(parents=True)
-    (lake / "Tables" / "T1" / "Stage.Record" / "part-0.parquet").write_text("x", encoding="utf-8")
+    # Delta materialisation (schema and object are separate path components).
+    (lake / "Tables" / "T1" / "Stage" / "Record" / "_delta_log").mkdir(parents=True)
+    (lake / "Tables" / "T1" / "Stage" / "Record" / "part-0.parquet").write_text("x", encoding="utf-8")
 
 
 def test_wipe_files_target_deletes_folder_but_not_runtime(tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ def test_wipe_files_target_deletes_folder_but_not_runtime(tmp_path: Path) -> Non
     # The runtime bundle under Files/_weaver is untouched.
     assert (lake / "Files" / "_weaver" / "runtime" / "catalogue.json").is_file()
     # Delta tables untouched by a Files wipe.
-    assert (lake / "Tables" / "T1" / "Stage.Record").exists()
+    assert (lake / "Tables" / "T1" / "Stage" / "Record").exists()
 
 
 def test_wipe_delta_target_deletes_tables(tmp_path: Path) -> None:

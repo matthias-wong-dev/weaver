@@ -62,7 +62,10 @@ def _write_python_object(path: Path) -> None:
             Primary key: record_id
             """
 
-            class StageRecord:
+            from weaver_runtime.dbrep.objects import Table
+
+
+            class Stage__Record(Table):
                 def read(self, spark):
                     drop = self.repo["T0.Raw.Drop"]
                     prior = self.repo["Stage.Prior"]

@@ -15,15 +15,26 @@ pytestmark = pytest.mark.spark
 
 FIXTURE_SES = Path(__file__).resolve().parents[1] / "fixtures" / "generic_ses" / "SES"
 
-# Every declared Delta table across the T1/T2/T3 SES databases.
+# Every declared Delta table across the T1/T2/T3 SES databases. Local Lakehouse
+# hosts co-locate databases, so paths are Tables/<database>/<schema>/<object>.
 DELTA_TABLES = {
-    "T1.Stage.Record": "T1/Stage.Record",
-    "T1.Mart.RecordAudit": "T1/Mart.RecordAudit",
-    "T1.Mart.RecordCurrentAuto": "T1/Mart.RecordCurrentAuto",
-    "T1.Mart.RecordCurrentKeep": "T1/Mart.RecordCurrentKeep",
-    "T2.Mart.RecordAggregate": "T2/Mart.RecordAggregate",
-    "T3.Report.RecordSummary": "T3/Report.RecordSummary",
+    "T1.Stage.Record": "T1/Stage/Record",
+    "T1.Mart.RecordAudit": "T1/Mart/RecordAudit",
+    "T1.Mart.RecordCurrentAuto": "T1/Mart/RecordCurrentAuto",
+    "T1.Mart.RecordCurrentKeep": "T1/Mart/RecordCurrentKeep",
+    "T2.Mart.RecordAggregate": "T2/Mart/RecordAggregate",
+    "T3.Report.RecordSummary": "T3/Report/RecordSummary",
 }
+
+# The superseded dotted layout must never be created.
+OLD_DOTTED_RELATIVE = [
+    "T1/Stage.Record",
+    "T1/Mart.RecordAudit",
+    "T1/Mart.RecordCurrentAuto",
+    "T1/Mart.RecordCurrentKeep",
+    "T2/Mart.RecordAggregate",
+    "T3/Report.RecordSummary",
+]
 
 
 def _expected_schema(runtime: Path, object_id: str):
@@ -89,6 +100,10 @@ def test_local_lakehouse_build_and_load(tmp_path: Path, spark, monkeypatch) -> N
     record = json.loads((runtime / "build_complete.json").read_text(encoding="utf-8"))
     assert set(record["result"]["created"]) == set(DELTA_TABLES)
 
+    # The superseded dotted layout must not exist.
+    for old in OLD_DOTTED_RELATIVE:
+        assert not (lake / "Tables" / old).exists(), f"old dotted path {old} exists"
+
     csv = tmp_path / "run1.csv"
     csv.write_text("record_id,group_id,amount\nr1,A,10\nr2,A,20\nr3,B,30\n", encoding="utf-8")
     monkeypatch.setenv("WEAVER_TEST_RUN_CSV", str(csv))
@@ -100,18 +115,18 @@ def test_local_lakehouse_build_and_load(tmp_path: Path, spark, monkeypatch) -> N
     # Folder object materialised under Files/, Delta tables under Tables/.
     assert (lake / "Files" / "T0" / "Raw" / "Drop" / "drop.csv").is_file()
 
-    stage = spark.read.format("delta").load(str(lake / "Tables" / "T1" / "Stage.Record"))
+    stage = spark.read.format("delta").load(str(lake / "Tables" / "T1" / "Stage" / "Record"))
     assert stage.count() == 3
 
     aggregate = {
         row["group_id"]: row["amount"]
         for row in spark.read.format("delta")
-        .load(str(lake / "Tables" / "T2" / "Mart.RecordAggregate"))
+        .load(str(lake / "Tables" / "T2" / "Mart" / "RecordAggregate"))
         .collect()
     }
     assert aggregate == {"A": 30, "B": 30}
 
-    summary = spark.read.format("delta").load(str(lake / "Tables" / "T3" / "Report.RecordSummary"))
+    summary = spark.read.format("delta").load(str(lake / "Tables" / "T3" / "Report" / "RecordSummary"))
     assert summary.count() == 2
 
 
@@ -135,7 +150,7 @@ def test_build_is_non_destructive(tmp_path: Path, spark, monkeypatch) -> None:
         return frame.count(), frame.schema, rows
 
     before = {relative: snapshot(relative) for relative in DELTA_TABLES.values()}
-    assert before["T1/Stage.Record"][0] == 3  # loaded data is present
+    assert before["T1/Stage/Record"][0] == 3  # loaded data is present
 
     # Rebuild over the loaded lakehouse.
     _build(weaver_path)
@@ -158,7 +173,7 @@ def test_wipe_then_build_recreates_empty_tables(tmp_path: Path, spark, monkeypat
     csv.write_text("record_id,group_id,amount\nr1,A,10\nr2,A,20\nr3,B,30\n", encoding="utf-8")
     monkeypatch.setenv("WEAVER_TEST_RUN_CSV", str(csv))
     assert load_target_runtime(runtime, execute=True, spark=spark).ok is True
-    assert spark.read.format("delta").load(str(lake / "Tables" / "T1" / "Stage.Record")).count() == 3
+    assert spark.read.format("delta").load(str(lake / "Tables" / "T1" / "Stage" / "Record")).count() == 3
 
     # Wipe the T1 Delta target: its database directory must be gone.
     assert main(["wipe", "--config", str(weaver_path), "--target", "T1_LOCAL_DELTA"]) == 0
@@ -215,7 +230,7 @@ def test_build_fails_when_table_declares_no_schema(tmp_path: Path) -> None:
         "Primary key: record_id\n"
         '"""\n\n'
         "from weaver_runtime.dbrep.objects import Table\n\n\n"
-        "class StageNoSchema(Table):\n"
+        "class Stage__NoSchema(Table):\n"
         "    def read(self, spark):\n"
         f"        open({str(sentinel)!r}, 'w').close()\n"
         "        return None\n",

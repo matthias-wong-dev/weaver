@@ -194,7 +194,9 @@ def _materialisation(target: ResolvedDatabase, schema: str, object_name: str) ->
     if target.is_files:
         return files_materialisation(target.database, schema, object_name)
     if target.is_delta:
-        return delta_materialisation(target.database, schema, object_name)
+        return delta_materialisation(
+            target.database, schema, object_name, fabric=target.is_fabric
+        )
     if target.is_sql:
         return f"{target.database}.{schema}.{object_name}"
     raise BuildError(

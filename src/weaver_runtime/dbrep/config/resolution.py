@@ -8,8 +8,10 @@ The conceptual stack is ``server.database.type.schema.object``:
 * ``schema``   schema / namespace / subfolder
 * ``object``   table / view / folder / load object
 
-Host-relative *materialisation* strings (``Files/<db>/<schema>/<object>``,
-``Tables/<db>/<schema>.<object>``) are pure and go into the manifest. Absolute
+Host-relative *materialisation* strings (``Files/<db>/<schema>/<object>``;
+``Tables/<db>/<schema>/<object>`` locally, ``Tables/<schema>/<object>`` on a
+Fabric Lakehouse where the Lakehouse is the database host) are pure and go into
+the manifest. Schema and object are always separate path components. Absolute
 filesystem paths additionally resolve the host against a base directory and are
 only meaningful for local/SES hosts.
 """
@@ -166,7 +168,10 @@ def files_object_path(resolved: ResolvedDatabase, schema: str, object_name: str)
 
 
 def delta_table_path(resolved: ResolvedDatabase, schema: str, object_name: str) -> Path:
-    return tables_root(resolved) / resolved.database / f"{schema}.{object_name}"
+    root = tables_root(resolved)
+    if resolved.is_fabric:
+        return root / schema / object_name
+    return root / resolved.database / schema / object_name
 
 
 # --- Host-relative materialisation strings (manifest) ----------------------
@@ -176,8 +181,20 @@ def files_materialisation(database: str, schema: str, object_name: str) -> str:
     return f"Files/{database}/{schema}/{object_name}"
 
 
-def delta_materialisation(database: str, schema: str, object_name: str) -> str:
-    return f"Tables/{database}/{schema}.{object_name}"
+def delta_materialisation(
+    database: str, schema: str, object_name: str, *, fabric: bool = False
+) -> str:
+    """Host-relative Delta table path with schema and object as separate dirs.
+
+    Local Lakehouse hosts co-locate multiple databases, so the database is a path
+    component: ``Tables/<database>/<schema>/<object>``. A Fabric Lakehouse *is*
+    the database host, so the database is omitted: ``Tables/<schema>/<object>``.
+    Schema and object are never joined into one dotted directory name.
+    """
+
+    if fabric:
+        return f"Tables/{schema}/{object_name}"
+    return f"Tables/{database}/{schema}/{object_name}"
 
 
 def sql_identity(resolved: ResolvedDatabase, schema: str, object_name: str) -> SqlIdentity:

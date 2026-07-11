@@ -228,7 +228,7 @@ def test_generate_emits_files_build_py_and_plan_per_host(tmp_path: Path) -> None
     assert doc["server"] == "Lake"
     assert doc["objects"] == ["T0.Raw.Drop", "T1.Stage.Record", "T1.Mart.Record"]
     assert doc["folders"] == ["Files/T0/Raw/Drop"]
-    assert doc["delta_tables"] == ["Tables/T1/Stage.Record", "Tables/T1/Mart.Record"]
+    assert doc["delta_tables"] == ["Tables/T1/Stage/Record", "Tables/T1/Mart/Record"]
 
 
 def test_generate_fails_before_writes_when_schema_missing(tmp_path: Path) -> None:

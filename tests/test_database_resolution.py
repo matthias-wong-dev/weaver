@@ -29,6 +29,7 @@ def _config(base_dir: str = "/cfg"):
                     "server": "endpoint.example.fabric.microsoft.com",
                     "degrees_of_parallelism": 8,
                 },
+                "Fabric_Lakehouse": {"server": "Workspace/T1", "platform": "fabric"},
             },
         },
         base_dir=base_dir,
@@ -52,6 +53,11 @@ def _config(base_dir: str = "/cfg"):
                     "type": "SQL",
                     "server": "Fabric_SQL_Server",
                     "database": "T2",
+                },
+                "T1_FABRIC_DELTA": {
+                    "type": "Delta",
+                    "server": "Fabric_Lakehouse",
+                    "database": "T1",
                 },
             },
         },
@@ -93,11 +99,32 @@ def test_files_object_path_and_materialisation() -> None:
 
 def test_delta_table_path_and_materialisation() -> None:
     config = _config()
-    resolved = resolve_database(config.get("T1_LOCAL_DELTA"), config.environment)
-    assert delta_table_path(resolved, "Stage", "Record") == Path(
-        "/cfg/.local/lakehouse/T1/Tables/T1/Stage.Record"
+    # Local: schema and object are separate path components under the database.
+    local = resolve_database(config.get("T1_LOCAL_DELTA"), config.environment)
+    assert delta_table_path(local, "Stage", "Record") == Path(
+        "/cfg/.local/lakehouse/T1/Tables/T1/Stage/Record"
     )
-    assert delta_materialisation("T1", "Stage", "Record") == "Tables/T1/Stage.Record"
+    assert delta_materialisation("T1", "Stage", "Record") == "Tables/T1/Stage/Record"
+    assert delta_materialisation("T1", "Mart", "RecordAudit") == "Tables/T1/Mart/RecordAudit"
+
+
+def test_fabric_delta_materialisation_omits_database() -> None:
+    config = _config()
+    fabric = resolve_database(config.get("T1_FABRIC_DELTA"), config.environment)
+    # The Fabric Lakehouse is the database host: no database path component.
+    assert delta_table_path(fabric, "Stage", "Record") == (
+        filesystem_host(fabric) / "Tables" / "Stage" / "Record"
+    )
+    assert delta_materialisation("T1", "Stage", "Record", fabric=True) == "Tables/Stage/Record"
+    assert delta_materialisation("T1", "Mart", "RecordAudit", fabric=True) == "Tables/Mart/RecordAudit"
+
+
+def test_no_delta_materialisation_uses_a_dotted_schema_object_component() -> None:
+    for fabric in (False, True):
+        for schema, obj in (("Stage", "Record"), ("Mart", "RecordAudit")):
+            path = delta_materialisation("T1", schema, obj, fabric=fabric)
+            assert f"{schema}.{obj}" not in path
+            assert f"{schema}/{obj}" in path
 
 
 def test_sql_identity_and_degrees_of_parallelism() -> None:
@@ -119,4 +146,5 @@ def test_resolve_all_returns_every_alias() -> None:
         "T0_LOCAL_FILES",
         "T1_LOCAL_DELTA",
         "T2_WAREHOUSE_SQL",
+        "T1_FABRIC_DELTA",
     }

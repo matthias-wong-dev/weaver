@@ -57,7 +57,7 @@ def test_plan_orders_and_materialises(tmp_path: Path) -> None:
     mart = plan.object_by_id("T1.Mart.RecordCurrent")
 
     assert drop.materialisation == "Files/T0/Raw/Drop"
-    assert stage.materialisation == "Tables/T1/Stage.Record"
+    assert stage.materialisation == "Tables/T1/Stage/Record"
 
     assert [(d.id, d.scope) for d in stage.dependencies] == [
         ("T0.Raw.Drop", "managed_cross_database")

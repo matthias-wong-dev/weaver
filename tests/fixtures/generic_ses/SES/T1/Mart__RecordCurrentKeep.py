@@ -15,7 +15,7 @@ from pathlib import Path
 from weaver_runtime.dbrep.objects import Table
 
 
-class MartRecordCurrentKeep(Table):
+class Mart__RecordCurrentKeep(Table):
     def read(self, spark):
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")

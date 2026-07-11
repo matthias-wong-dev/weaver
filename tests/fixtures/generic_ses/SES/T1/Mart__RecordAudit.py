@@ -13,7 +13,7 @@ from pathlib import Path
 from weaver_runtime.dbrep.objects import Table
 
 
-class MartRecordAudit(Table):
+class Mart__RecordAudit(Table):
     def read(self, spark):
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")

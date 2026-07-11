@@ -14,7 +14,7 @@ from pathlib import Path
 from weaver_runtime.dbrep.objects import Table
 
 
-class StageRecord(Table):
+class Stage__Record(Table):
     def read(self, spark):
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")

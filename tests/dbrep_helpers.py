@@ -51,7 +51,8 @@ def write_python_table(
     if not dep_lines:
         dep_lines = "        pass"
     source = _docstring(meta) + (
-        f"\n\nclass {schema}{obj}:\n"
+        "\n\nfrom weaver_runtime.dbrep.objects import Table\n\n\n"
+        f"class {schema}__{obj}(Table):\n"
         f"    def read(self, spark):\n"
         f"{dep_lines}\n"
         f"        return None\n"
@@ -74,7 +75,8 @@ def write_python_folder(
     if not dep_lines:
         dep_lines = "        pass"
     source = _docstring(meta) + (
-        f"\n\nclass {schema}{obj}:\n"
+        "\n\nfrom weaver_runtime.dbrep.objects import Folder\n\n\n"
+        f"class {schema}__{obj}(Folder):\n"
         f"    def load(self):\n"
         f"{dep_lines}\n"
         f"        return None\n"

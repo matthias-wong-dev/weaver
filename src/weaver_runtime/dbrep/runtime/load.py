@@ -241,7 +241,8 @@ def _make_repo(catalogue_by_id: dict, database: str, current_id: str, spark_root
 
 def _instantiate(source_object, context: LoadContext):
     module = _import_object_module(source_object)
-    cls = _find_object_class(module)
+    expected_name = source_object.metadata.qualified.replace(".", "__")
+    cls = _find_object_class(module, expected_name)
     return cls(context)
 
 
@@ -256,7 +257,11 @@ def _import_object_module(source_object):
     return module
 
 
-def _find_object_class(module):
+def _find_object_class(module, expected_name: str | None = None):
+    """Runtime safeguard for installed/modified bundles (static discovery is the
+    normal failure point). Prefers the class named for the installed source file.
+    """
+
     candidates = [
         value
         for value in vars(module).values()
@@ -265,11 +270,25 @@ def _find_object_class(module):
         and value.__module__ == module.__name__
         and value not in (WeaverObject, Folder, Table, View)
     ]
+    if expected_name is not None:
+        named = [cls for cls in candidates if cls.__name__ == expected_name]
+        if len(named) == 1:
+            return named[0]
+
     if len(candidates) != 1:
+        found = ", ".join(sorted(cls.__name__ for cls in candidates)) or "none"
+        expected = f" named {expected_name!r}" if expected_name else ""
         raise LoadError(
-            f"object file must define exactly one Weaver object, found {len(candidates)}"
+            f"installed object module must define exactly one Weaver object class"
+            f"{expected}; found {found}"
         )
-    return candidates[0]
+    only = candidates[0]
+    if expected_name is not None and only.__name__ != expected_name:
+        raise LoadError(
+            f"installed object class must be named {expected_name!r} to match its "
+            f"source filename; found {only.__name__!r}"
+        )
+    return only
 
 
 def _join_root(root, relative: str):

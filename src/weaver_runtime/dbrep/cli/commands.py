@@ -522,12 +522,18 @@ def run_wipe(config_path, target: str) -> dict:
 def _wipe_lakehouse(target: str, resolved) -> dict:
     """Wipe a Files or Delta representation: its materialisations under the host.
 
-    Files -> ``Files/<database>``; Delta -> ``Tables/<database>``. Local hosts use
-    a filesystem delete; Fabric hosts use a single OneLake recursive delete.
+    Files -> ``Files/<database>``. Delta local -> ``Tables/<database>`` (the
+    database's table dir among co-located databases); Delta Fabric -> ``Tables``
+    (the Lakehouse *is* the database host, so its whole table area). Local hosts
+    use a filesystem delete; Fabric hosts use a single OneLake recursive delete.
     """
 
-    subfolder = "Files" if resolved.is_files else "Tables"
-    relative = f"{subfolder}/{resolved.database}"
+    if resolved.is_files:
+        relative = f"Files/{resolved.database}"
+    elif resolved.is_fabric:
+        relative = "Tables"
+    else:
+        relative = f"Tables/{resolved.database}"
 
     if resolved.is_fabric:
         from ..fabric import onelake
@@ -540,7 +546,7 @@ def _wipe_lakehouse(target: str, resolved) -> dict:
 
         from ..config.resolution import lakehouse_root
 
-        path = lakehouse_root(resolved) / subfolder / resolved.database
+        path = lakehouse_root(resolved) / relative
         existed = path.exists()
         shutil.rmtree(path, ignore_errors=True)
         location = str(path)

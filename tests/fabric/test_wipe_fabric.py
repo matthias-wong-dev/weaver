@@ -96,9 +96,10 @@ def test_lakehouse_wipe_deletes_files_and_tables(tmp_path: Path, fabric_lakehous
     lakehouse = fabric_lakehouse_target["lakehouse"]
     info = onelake.resolve_lakehouse(workspace, lakehouse)
 
-    # Seed a Files/T0 folder and a Tables/T1 table folder.
+    # Seed a Files/T0 folder and a Delta table. On Fabric the Lakehouse is the
+    # database host, so Delta tables live at Tables/<schema>/<object>.
     _dfs_put(info, "Files/T0/Raw/Drop/drop.csv", b"a,b\n1,2\n")
-    _dfs_put(info, "Tables/T1/Stage.Record/_delta_log/00.json", b"{}")
+    _dfs_put(info, "Tables/Stage/Record/_delta_log/00.json", b"{}")
 
     weaver = write_config_files(
         tmp_path,
