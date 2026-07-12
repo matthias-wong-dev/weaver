@@ -8,8 +8,10 @@ Spark.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -381,7 +383,23 @@ def _instantiate(source_object, context: LoadContext):
 
 
 def _import_object_module(source_object):
-    module_name = "weaver_obj_" + source_object.id.replace(".", "_")
+    # Import each object as a submodule of a synthetic package rooted at its own
+    # database folder, so the object's relative imports (``from .foo import ...``)
+    # resolve against that folder by ordinary Python rules. Each database gets its
+    # own package, so same-named sibling modules in different databases stay
+    # distinct in ``sys.modules`` instead of aliasing — which matters whenever one
+    # process loads objects from more than one database.
+    db_dir = Path(source_object.source_path).parent
+    package_name = "weaver_ses_" + re.sub(r"\W", "_", source_object.database)
+    if package_name not in sys.modules:
+        package_spec = importlib.machinery.ModuleSpec(
+            package_name, None, is_package=True
+        )
+        package_spec.submodule_search_locations = [str(db_dir)]
+        package = importlib.util.module_from_spec(package_spec)
+        sys.modules[package_name] = package
+
+    module_name = package_name + "." + Path(source_object.source_path).stem
     spec = importlib.util.spec_from_file_location(module_name, source_object.source_path)
     if spec is None or spec.loader is None:
         raise LoadError(f"cannot import object module: {source_object.source_path}")

@@ -15,7 +15,8 @@ from weaver_runtime.dbrep.runtime.orchestrator import load_target_runtime
 
 def _setup(tmp_path: Path):
     ses_root = tmp_path / "SES"
-    # Shared and database-level helper folders that must be carried into runtime.
+    # A repo-root ``_helpers`` is NOT a shared convention: it is not carried into
+    # the runtime. Only each database owns its helpers (see the T1 folder below).
     (ses_root / "_helpers").mkdir(parents=True)
     (ses_root / "_helpers" / "shared.py").write_text("SHARED = 1\n", encoding="utf-8")
 
@@ -60,11 +61,13 @@ def test_install_writes_bundle_orchestrator_and_sources(tmp_path: Path) -> None:
     assert (root / "_orchestrator" / "weaver_load.py").is_file()
     assert (root / "_orchestrator" / "weaver_runtime" / "dbrep" / "objects.py").is_file()
 
-    # Source snapshot preserves the discoverable layout, including _ helper folders.
+    # Source snapshot preserves each database's own layout, including its
+    # ``_helpers``. There is no shared ``objects/_helpers``: a repo-root
+    # ``_helpers`` is not carried, each database owns its helpers.
     assert (root / "objects" / "T0" / "Raw__Drop.py").is_file()
     assert (root / "objects" / "T1" / "Stage__Record.py").is_file()
-    assert (root / "objects" / "_helpers" / "shared.py").is_file()
     assert (root / "objects" / "T1" / "_helpers" / "table_helpers.py").is_file()
+    assert not (root / "objects" / "_helpers").exists()
 
 
 def test_reinstall_replaces_database_source_snapshot(tmp_path: Path) -> None:

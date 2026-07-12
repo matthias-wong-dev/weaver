@@ -45,6 +45,39 @@ class Sales__CustomerOrder(Table):
 
 The normal no-delete case for either kind is `return upserts, ()`.
 
+## Helpers
+
+The mechanical work an object delegates — `download_and_prepare_files` and
+`build_customer_orders` above — lives in a subfolder **inside the object's own
+database folder**, imported **relative to that folder**:
+
+```text
+SES/
+  Sales/                      <- a database folder (a build source)
+    Sales__CustomerOrder.py
+    _helpers/                 <- any name works; see the naming note
+      __init__.py
+      orders.py               <- build_customer_orders lives here
+```
+
+```python
+from ._helpers.orders import build_customer_orders   # in the object
+from .orders import parse_row                         # helper -> sibling helper
+```
+
+Weaver imports every object with its own database folder as the package root, so
+`from .<subfolder>…` is ordinary Python resolved against that folder. Each database
+is its own package, so two databases may ship like-named helper modules with
+different content and never collide. There is no shared, repo-wide helper package.
+
+**Naming is your choice** — the subfolder can be `_helpers`, `helpers`, `lib`,
+`vendor`, anything. Discovery scans a database folder's *immediate files* for objects
+and never descends into subfolders, so a helper *subfolder* is invisible to it whatever
+its name. The one rule: a loose helper *file* placed **directly** beside your object
+files (e.g. `Sales/orders.py`) would be treated as an object — so either keep helpers
+in a subfolder (any name) or prefix such a file with `_` (e.g. `_orders.py`). The `_`
+prefix is a convention that also signals "not an object" to a reader.
+
 ## Workflow logging
 
 Each `weaver load` invocation is one **workflow**. Weaver mints a

@@ -250,6 +250,13 @@ def _install_sources(root: Path, source_by_db: dict) -> None:
     objects_root = root / "objects"
     objects_root.mkdir(parents=True, exist_ok=True)
 
+    # Remove a stale shared helpers folder left by bundles built before per-database
+    # helper ownership. Each database now carries its own ``_helpers``; there is no
+    # shared ``objects/_helpers``.
+    stale_shared_helpers = objects_root / "_helpers"
+    if stale_shared_helpers.exists():
+        shutil.rmtree(stale_shared_helpers)
+
     for database, source in source_by_db.items():
         source_root = ses_source_root(source)
         legacy_destination = root / database
@@ -259,15 +266,6 @@ def _install_sources(root: Path, source_by_db: dict) -> None:
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(source_root, destination, dirs_exist_ok=True, ignore=_IGNORE)
-
-        shared_helpers = source_root.parent / "_helpers"
-        if shared_helpers.is_dir():
-            shutil.copytree(
-                shared_helpers,
-                objects_root / "_helpers",
-                dirs_exist_ok=True,
-                ignore=_IGNORE,
-            )
 
     legacy_helpers = root / "_helpers"
     if legacy_helpers.exists():
