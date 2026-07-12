@@ -115,10 +115,15 @@ def _run_program(
 ) -> dict:
     """Submit a generated Weaver program through the generic Livy runtime."""
 
+    import os
+
     from weaver_runtime.fabric import auth, livy
     from weaver_runtime.fabric.settings import resolve_settings
 
     settings = resolve_settings()
+    # Optionally attach a Fabric Spark Environment (for pip libraries the default
+    # runtime lacks) so the same generated program can run where deps are needed.
+    environment_id = os.environ.get("WEAVER_FABRIC_ENVIRONMENT_ID") or None
     return livy.run_runtime_program(
         resolved["workspace_id"],
         resolved["lakehouse_id"],
@@ -128,6 +133,7 @@ def _run_program(
         api_version=settings.livy_api_version,
         poll_interval=poll_interval,
         timeout=timeout,
+        environment_id=environment_id,
     )
 
 

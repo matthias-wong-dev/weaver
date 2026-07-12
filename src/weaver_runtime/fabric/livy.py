@@ -183,6 +183,8 @@ def run_runtime_program(
     poll_interval: float = 10.0,
     timeout: float = 1800.0,
     mount: str = "/weaver_runtime_mount",
+    environment_id: str | None = None,
+    conf: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute an arbitrary generated Weaver program in Fabric Spark via Livy.
 
@@ -208,6 +210,8 @@ def run_runtime_program(
         api_version=api_version,
         poll_interval=poll_interval,
         timeout=timeout,
+        environment_id=environment_id,
+        conf=conf,
     )
     return parse_runtime_result((output.get("data") or {}).get("text/plain", ""))
 

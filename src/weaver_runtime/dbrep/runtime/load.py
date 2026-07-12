@@ -183,7 +183,7 @@ def _run_step(
     try:
         materialisation = catalogue_by_id[object_id]["materialisation"]
         repo = _make_repo(
-            catalogue_by_id, source_object.database, object_id, spark_root, spark
+            catalogue_by_id, source_object.database, object_id, spark_root, spark, lakehouse_root
         )
         if kind == "Folder":
             _execute_folder_step(
@@ -338,7 +338,9 @@ def _execute_table_step(
     }
 
 
-def _make_repo(catalogue_by_id: dict, database: str, current_id: str, spark_root, spark) -> Repo:
+def _make_repo(
+    catalogue_by_id: dict, database: str, current_id: str, spark_root, spark, lakehouse_root=None
+) -> Repo:
     def resolve(key: str):
         parts = key.split(".")
         object_id = key if len(parts) >= 3 else f"{database}.{key}"
@@ -348,14 +350,17 @@ def _make_repo(catalogue_by_id: dict, database: str, current_id: str, spark_root
                 f"dependency {key!r} ({object_id}) required by {current_id} "
                 "is not in the installed catalogue"
             )
-        path = _join_root(spark_root, entry["materialisation"])
         kind = entry.get("kind")
         if kind == "Folder":
-            return path
+            # Folder dependencies are read with ordinary Python file I/O, so they
+            # must resolve against the local/FUSE lakehouse_root, not the Spark
+            # (abfss://) root that Delta tables use.
+            root = lakehouse_root if lakehouse_root is not None else spark_root
+            return _join_root(root, entry["materialisation"])
         if kind == "Table":
             if spark is None:
                 raise LoadError(f"table dependency {object_id} requires Spark")
-            return spark.read.format("delta").load(str(path))
+            return spark.read.format("delta").load(str(_join_root(spark_root, entry["materialisation"])))
         if kind == "View":
             return entry
         raise LoadError(f"dependency {object_id} has unsupported kind {kind!r}")
