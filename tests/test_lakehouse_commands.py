@@ -75,7 +75,7 @@ def _fabric_config(tmp_path: Path) -> Path:
     ses_root = tmp_path / "SES"
     servers = {
         "SES_Repo": {"server": str(ses_root)},
-        "Fabric": {"server": "Workspace/Lakehouse", "platform": "fabric"},
+        "Fabric": {"type": "Fabric Lakehouse", "server": "Workspace/Lakehouse"},
     }
     databases = {
         "T0_SES": {"type": "SES", "server": "SES_Repo", "database": "T0"},
@@ -108,7 +108,7 @@ def _mock_fabric(monkeypatch) -> dict:
 
     def fake_run(resolved, program, **kwargs):
         calls["programs"].append(program)
-        return {"root": "abfss://W@onelake/L", "created": ["T1.Stage.Record"], "existing": []}
+        return ({"root": "abfss://W@onelake/L", "created": ["T1.Stage.Record"], "existing": []}, None)
 
     monkeypatch.setattr(fabric_lakehouse.onelake, "resolve_lakehouse", fake_resolve)
     monkeypatch.setattr(fabric_lakehouse.onelake, "sync_runtime_folder", fake_sync)
@@ -207,7 +207,7 @@ def test_fabric_load_renders_same_program_and_honours_filters(tmp_path: Path, mo
 
     def fake_run(resolved, program, **kwargs):
         captured["program"] = program
-        return {"ok": True, "executed": True, "steps": []}
+        return ({"ok": True, "executed": True, "steps": []}, None)
 
     monkeypatch.setattr(fabric_lakehouse.onelake, "resolve_lakehouse", fake_resolve)
     monkeypatch.setattr(fabric_lakehouse, "_run_program", fake_run)

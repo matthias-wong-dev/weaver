@@ -18,9 +18,12 @@ def _environment():
         {
             "version": 1,
             "servers": {
-                "SES_Repo": {"server": "/repo/SES"},
-                "Fabric_T1_Lakehouse": {"server": "Workspace/T1"},
+                "SES_Repo": {"type": "SES", "server": "/repo/SES"},
+                "Fabric_T1_Lakehouse": {
+                    "type": "Fabric Lakehouse", "server": "Workspace/T1"
+                },
                 "Fabric_SQL_Server": {
+                    "type": "SQL",
                     "server": "endpoint.example.fabric.microsoft.com",
                     "degrees_of_parallelism": 8,
                 },
@@ -81,6 +84,26 @@ def test_lakehouse_host_can_contain_files_and_delta_representations() -> None:
     assert files.type != delta.type
 
 
+def test_database_environment_override_resolves_over_server_default() -> None:
+    environment = _environment()
+    fabric = environment.get("Fabric_T1_Lakehouse")
+    object.__setattr__(fabric, "environment", "Default")
+    payload = _databases_payload()
+    payload["databases"]["T1_LAKEHOUSE_DELTA"]["environment"] = "Override"
+    config = parse_databases_config(payload, environment, base_dir="/cfg")
+    from weaver_runtime.dbrep.config import resolve_database
+
+    resolved = resolve_database(config.get("T1_LAKEHOUSE_DELTA"), environment)
+    assert resolved.environment == "Override"
+
+
+def test_rejects_database_server_type_mismatch() -> None:
+    payload = _databases_payload()
+    payload["databases"]["T0_SES"]["server"] = "Fabric_SQL_Server"
+    with pytest.raises(ConfigError, match="incompatible"):
+        parse_databases_config(payload, _environment(), base_dir="/cfg")
+
+
 def test_rejects_invalid_type() -> None:
     payload = _databases_payload()
     payload["databases"]["T0_SES"]["type"] = "Parquet"
@@ -104,7 +127,7 @@ def test_requires_type_server_database_keys() -> None:
 
 def test_load_databases_config_resolves_uses_environment(tmp_path: Path) -> None:
     (tmp_path / "env.yml").write_text(
-        "version: 1\nservers:\n  Repo:\n    server: SES\n",
+        "version: 1\nservers:\n  Repo:\n    type: SES\n    server: SES\n",
         encoding="utf-8",
     )
     weaver_path = tmp_path / "weaver.yml"

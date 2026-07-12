@@ -94,23 +94,22 @@ import them only when SQL discovery / SQL connections actually run.
 
 ### Object authoring and runtime logging (`dbrep/runtime`)
 
-Both kinds implement `read()` returning one `(upserts, deletes, messages)`
-triplet (never `load()`): `Folder.read()` → `(staging_folder,
-file_names_to_delete, messages)` staged in a Weaver-issued folder (object code
+Both kinds implement `read()` returning one `(upserts, deletes)` pair (never
+`load()`): `Folder.read()` → `(staging_folder, file_names_to_delete)` staged in a Weaver-issued folder (object code
 never writes the destination directly); `Table.read(spark)` →
-`(staging_dataframe, primary_key_values_to_delete, messages)`. Weaver owns all
+`(staging_dataframe, primary_key_values_to_delete)`. Weaver owns all
 mutation, CRUD counting, and logging. Deletion has one authority: a table without
 a primary key cannot delete rows, and `Auto delete: true` and explicit delete
 tuples cannot be combined (enforced in `runtime/load_policy.py` before any
 write). `runtime/folders.py` is the pure staging contract + reconciliation (file
 CRUD by size/content diff over only the staged files and explicit deletes, never
-a full destination rescan); `runtime/logging.py` holds the shared triplet/message
-validators; `runtime/workflow_logging.py` mints one `{timestamp}_{uuid}` workflow
+a full destination rescan); `runtime/logging.py` holds the shared pair validator;
+`runtime/workflow_logging.py` mints one `{timestamp}_{uuid}` workflow
 per `load`, writes one `{timestamp}_{uuid}.json` step record per object under
 `Files/_logs/<workflow_id>` the moment it finishes (success or failure, with the
 full structured exception), and keeps object/module names inside the JSON. Every
 step carries a common `CrudCounts` (`unit: files`/`rows`); kind specifics live in
-`details`. Messages are small `{level, message, fields?}` mappings. `folders.py`,
+`details`. `folders.py`,
 `load_policy.py`, and `workflow_logging.py` are pure stdlib — no PySpark. See
 `docs/authoring.md` for the authoring reference.
 
@@ -127,7 +126,8 @@ Source objects for a SQL target must be `.sql`.
 
 ### Fabric Lakehouse backend (`dbrep/fabric`)
 
-Set `platform: fabric` on a server whose `server` is `Workspace/Lakehouse`.
+Declare a `Fabric Lakehouse` server with `server: Workspace/Lakehouse` and an
+optional Fabric `environment` name.
 Build stages the bundle locally then syncs `Files/` to OneLake through the shared
 movement layer (`weaver_runtime.fabric.sync`): `Files/_weaver/runtime` syncs with
 signature diff + scoped delete (Weaver-owned), object folders sync without

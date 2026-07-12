@@ -94,7 +94,7 @@ def test_local_catalogue_uses_separate_schema_object_paths(tmp_path: Path) -> No
 def test_fabric_artifact_delta_paths_omit_database(tmp_path: Path) -> None:
     servers = {
         "SES_Repo": {"server": str(FIXTURE_SES)},
-        "Fabric": {"server": "Workspace/T1", "platform": "fabric"},
+        "Fabric": {"type": "Fabric Lakehouse", "server": "Workspace/T1"},
     }
     databases = {
         "T0_SES": {"type": "SES", "server": "SES_Repo", "database": "T0"},

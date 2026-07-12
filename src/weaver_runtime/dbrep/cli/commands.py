@@ -62,6 +62,11 @@ def run_build(
             "dry_run": True,
             "plan": format_dry_run(plan),
             "objects": list(plan.order),
+            "environments": {
+                pair.target.alias: pair.target.environment
+                for pair in plan.pairs
+                if pair.target.is_fabric
+            },
             "external": [external.id for external in plan.external_dependencies],
         }
 
@@ -201,6 +206,8 @@ def _build_fabric_targets(plan, fabric_pairs) -> list[dict]:
             "lakehouse": result.lakehouse,
             "uploaded": result.uploaded,
             "runtime_root": result.runtime_root,
+            "environment": result.environment,
+            "environment_id": result.environment_id,
             "result": result.result,
         }
         for result in build_fabric_lakehouse(plan, fabric_pairs)
@@ -398,6 +405,7 @@ def run_load(
                     "type": "Fabric Lakehouse",
                     "workspace": resolved.fabric_workspace,
                     "lakehouse": resolved.fabric_lakehouse,
+                    "environment": resolved.environment,
                     "executed": False,
                 }
             from ..fabric.lakehouse import load_fabric_lakehouse

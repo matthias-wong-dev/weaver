@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .databases import DELTA, FILES, SES, SQL, DatabaseConfig, DatabasesConfig
-from .environment import EnvironmentConfig
+from .environment import FABRIC_LAKEHOUSE_SERVER, EnvironmentConfig
 
 RUNTIME_RELATIVE_ROOT = "Files/_weaver/runtime"
 MANIFEST_RELATIVE_PATH = "Files/_weaver/runtime/manifest.json"
@@ -48,27 +48,17 @@ class ResolvedDatabase:
     type: str
     database: str
     server_alias: str
-    host: str
+    server_type: str
+    host: str | None
     degrees_of_parallelism: int | None
     base_dir: Path
-    platform: str = "local"
+    fabric_workspace: str | None = None
+    fabric_lakehouse: str | None = None
+    environment: str | None = None
 
     @property
     def is_fabric(self) -> bool:
-        return self.platform == "fabric"
-
-    @property
-    def fabric_workspace(self) -> str:
-        """Workspace name parsed from a ``Workspace/Lakehouse`` Fabric host."""
-
-        return self.host.split("/", 1)[0]
-
-    @property
-    def fabric_lakehouse(self) -> str:
-        """Lakehouse name parsed from a ``Workspace/Lakehouse`` Fabric host."""
-
-        parts = self.host.split("/", 1)
-        return parts[1] if len(parts) == 2 else self.database
+        return self.server_type == FABRIC_LAKEHOUSE_SERVER
 
     @property
     def is_ses(self) -> bool:
@@ -104,10 +94,13 @@ def resolve_database(
         type=database.type,
         database=database.database,
         server_alias=database.server,
+        server_type=server.type,
         host=server.server,
         degrees_of_parallelism=server.degrees_of_parallelism,
         base_dir=Path(base_dir) if base_dir is not None else environment.base_dir,
-        platform=server.platform,
+        fabric_workspace=(server.server or "").split("/", 1)[0] if server.type == FABRIC_LAKEHOUSE_SERVER else None,
+        fabric_lakehouse=(server.server or "").split("/", 1)[1] if server.type == FABRIC_LAKEHOUSE_SERVER else None,
+        environment=database.environment or server.environment,
     )
 
 
@@ -131,6 +124,8 @@ def filesystem_host(resolved: ResolvedDatabase) -> Path:
     must not be used by filesystem adapters.
     """
 
+    if resolved.host is None:
+        raise ValueError(f"server {resolved.server_alias!r} has no filesystem host")
     path = Path(resolved.host).expanduser()
     if not path.is_absolute():
         path = resolved.base_dir / path
@@ -199,7 +194,7 @@ def delta_materialisation(
 
 def sql_identity(resolved: ResolvedDatabase, schema: str, object_name: str) -> SqlIdentity:
     return SqlIdentity(
-        server=resolved.host,
+        server=resolved.host or "",
         database=resolved.database,
         schema=schema,
         object=object_name,

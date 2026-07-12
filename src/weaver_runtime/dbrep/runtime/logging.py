@@ -3,15 +3,13 @@
 These models are object-kind neutral: a Folder step and a Table step share one
 :class:`StepLog` shape and one :class:`CrudCounts` structure, differing only in
 the unit of work (``files`` vs ``rows``) and their supplementary ``details``.
-It also holds the shared authoring-contract helpers both kinds use: every
-``read()`` returns the same ``(upserts, deletes, messages)`` triplet, and the
-third item is a sequence of small structured messages.
+It also holds the shared authoring-contract helper both kinds use: every
+``read()`` returns the same ``(upserts, deletes)`` pair.
 The module imports nothing heavy so it is safe to import anywhere in the core.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from ..errors import LoadError
@@ -21,70 +19,20 @@ ROWS = "rows"
 
 _UNIT_BY_KIND = {"Folder": FILES, "Table": ROWS}
 
-# Supported supplementary-message levels. Errors are captured centrally from
-# exceptions, never supplied as messages, so they are not a level here.
-MESSAGE_LEVELS = ("info", "warning")
-_MESSAGE_KEYS = frozenset({"level", "message", "fields"})
+def require_load_pair(result, kind: str) -> tuple:
+    """Require an object ``read()`` to return exactly two values.
 
-
-def require_triplet(result, kind: str) -> tuple:
-    """Require an object ``read()`` to return exactly three values.
-
-    Both kinds share the endpoint shape ``(upserts, deletes, messages)``; a bare
+    Both kinds share the endpoint shape ``(upserts, deletes)``; a bare
     return value (e.g. a DataFrame or a StagingFolder) or a wrong-arity tuple is
     rejected before any validation or mutation.
     """
 
-    if not isinstance(result, tuple) or len(result) != 3:
+    if not isinstance(result, tuple) or len(result) != 2:
         shape = f"a {len(result)}-tuple" if isinstance(result, tuple) else type(result).__name__
         raise LoadError(
-            f"{kind}.read() must return exactly three values "
-            f"(upserts, deletes, messages); got {shape}"
+            f"{kind}.read() must return exactly two values (upserts, deletes); got {shape}"
         )
     return result
-
-
-def validate_messages(messages) -> tuple[dict, ...]:
-    """Validate the supplementary-message sequence and return it normalised.
-
-    Each message is a small stable mapping: a required ``level`` (one of
-    :data:`MESSAGE_LEVELS`), a required non-empty ``message`` string, and an
-    optional ``fields`` mapping for structured context. The whole message must
-    be JSON-serialisable.
-    """
-
-    if isinstance(messages, (str, bytes, dict)):
-        raise LoadError("messages must be a sequence of message mappings")
-    try:
-        items = list(messages)
-    except TypeError as exc:
-        raise LoadError("messages must be a sequence of message mappings") from exc
-
-    validated: list[dict] = []
-    for message in items:
-        if not isinstance(message, dict):
-            raise LoadError("each message must be a mapping")
-        unexpected = set(message) - _MESSAGE_KEYS
-        if unexpected:
-            raise LoadError(
-                "message keys must be a subset of {level, message, fields}; "
-                f"unexpected {sorted(unexpected)}"
-            )
-        if message.get("level") not in MESSAGE_LEVELS:
-            raise LoadError(
-                f"message 'level' must be one of {MESSAGE_LEVELS}; got {message.get('level')!r}"
-            )
-        text = message.get("message")
-        if not isinstance(text, str) or not text.strip():
-            raise LoadError("message 'message' must be non-empty text")
-        if "fields" in message and not isinstance(message["fields"], dict):
-            raise LoadError("message 'fields' must be a mapping when present")
-        try:
-            json.dumps(message)
-        except (TypeError, ValueError) as exc:
-            raise LoadError("messages must be JSON-serialisable") from exc
-        validated.append(dict(message))
-    return tuple(validated)
 
 
 def crud_unit_for_kind(kind: str) -> str:
@@ -132,7 +80,6 @@ class StepLog:
     crud: CrudCounts
     completed_at: str | None = None
     duration_ms: int | None = None
-    messages: tuple[dict, ...] = ()
     details: dict = field(default_factory=dict)
     error: dict | None = None
 
@@ -147,7 +94,6 @@ class StepLog:
             "kind": self.kind,
             "status": self.status,
             "crud": self.crud.to_dict(),
-            "messages": [dict(message) for message in self.messages],
             "details": dict(self.details),
             "error": self.error,
         }

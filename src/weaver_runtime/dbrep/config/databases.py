@@ -28,7 +28,15 @@ from typing import Any
 import yaml
 
 from ..errors import ConfigError
-from .environment import EnvironmentConfig, load_environment_config, parse_environment_config
+from .environment import (
+    FABRIC_LAKEHOUSE_SERVER,
+    LOCAL_LAKEHOUSE_SERVER,
+    SES_SERVER,
+    SQL_SERVER,
+    EnvironmentConfig,
+    load_environment_config,
+    parse_environment_config,
+)
 
 SES = "SES"
 FILES = "Files"
@@ -37,6 +45,11 @@ SQL = "SQL"
 DATABASE_TYPES = frozenset({SES, FILES, DELTA, SQL})
 
 _REQUIRED_DATABASE_KEYS = {"type", "server", "database"}
+_ALLOWED_DATABASE_KEYS = _REQUIRED_DATABASE_KEYS | {"environment"}
+_COMPATIBLE_SERVER_TYPES = {
+    SES: {SES_SERVER}, FILES: {LOCAL_LAKEHOUSE_SERVER, FABRIC_LAKEHOUSE_SERVER},
+    DELTA: {LOCAL_LAKEHOUSE_SERVER, FABRIC_LAKEHOUSE_SERVER}, SQL: {SQL_SERVER},
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +64,7 @@ class DatabaseConfig:
     type: str
     server: str
     database: str
+    environment: str | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,9 @@ def _parse_database(alias: str, raw: Any, environment: EnvironmentConfig) -> Dat
         raise ConfigError(
             f"database {alias!r} is missing required keys: " + ", ".join(sorted(missing))
         )
+    unknown = set(raw) - _ALLOWED_DATABASE_KEYS
+    if unknown:
+        raise ConfigError(f"database {alias!r} has unknown keys: {', '.join(sorted(unknown))}")
 
     type_value = raw.get("type")
     if type_value not in DATABASE_TYPES:
@@ -163,14 +180,31 @@ def _parse_database(alias: str, raw: Any, environment: EnvironmentConfig) -> Dat
         raise ConfigError(
             f"database {alias!r} references unknown server {server.strip()!r}"
         )
+    server_config = environment.get(server.strip())
+    if server_config.type not in _COMPATIBLE_SERVER_TYPES[type_value]:
+        raise ConfigError(
+            f"database {alias!r} type {type_value!r} is incompatible with "
+            f"server {server.strip()!r} type {server_config.type!r}"
+        )
 
     database = raw.get("database")
     if not isinstance(database, str) or not database.strip():
         raise ConfigError(f"database {alias!r} must define a non-empty 'database' name")
+
+    environment_name = raw.get("environment")
+    if environment_name is not None:
+        if not isinstance(environment_name, str) or not environment_name.strip():
+            raise ConfigError(f"database {alias!r} environment must be a non-empty string")
+        if type_value not in (FILES, DELTA) or server_config.type != FABRIC_LAKEHOUSE_SERVER:
+            raise ConfigError(
+                f"database {alias!r} environment is valid only for Files or Delta "
+                "on a Fabric Lakehouse server"
+            )
 
     return DatabaseConfig(
         alias=alias,
         type=type_value,
         server=server.strip(),
         database=database.strip(),
+        environment=environment_name.strip() if environment_name else None,
     )

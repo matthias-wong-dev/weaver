@@ -16,15 +16,14 @@ from pathlib import Path
 from ..errors import LoadError
 from ..objects import Folder, Table, View, WeaverObject
 from .context import LoadContext, Repo
-from .folders import apply_folder_result, validate_folder_triplet
+from .folders import apply_folder_result, validate_folder_result
 from .load_policy import run_table_load
 from .logging import (
     CrudCounts,
     LoadReport,
     StepLog,
     crud_unit_for_kind,
-    require_triplet,
-    validate_messages,
+    require_load_pair,
 )
 from .rejects import write_rejects
 from .workflow_logging import (
@@ -256,7 +255,7 @@ def _execute_folder_step(
     )
     try:
         result = _instantiate(source_object, context).read()
-        upsert_path, delete_names, messages = validate_folder_triplet(
+        upsert_path, delete_names = validate_folder_result(
             result, issued=context.issued_staging(), destination=destination
         )
         counts = apply_folder_result(upsert_path, delete_names, destination)
@@ -265,7 +264,6 @@ def _execute_folder_step(
 
     loaded[object_id] = destination
     log.crud = counts
-    log.messages = messages
 
 
 def _execute_table_step(
@@ -296,9 +294,8 @@ def _execute_table_step(
         metadata=source_object.metadata,
     )
     result = _instantiate(source_object, context).read(spark)
-    staging_dataframe, delete_keys, messages = require_triplet(result, "Table")
+    staging_dataframe, delete_keys = require_load_pair(result, "Table")
     _require_dataframe(staging_dataframe)
-    messages = validate_messages(messages)
 
     schema = schema_by_id.get(object_id, source_object.metadata.schema)
     frame = _align_frame_to_schema(staging_dataframe, schema)
@@ -327,7 +324,6 @@ def _execute_table_step(
         updated=counts["updated"],
         deleted=counts["deleted"],
     )
-    log.messages = messages
     log.details = {
         "accepted": counts["accepted"],
         "rejected": counts["rejected"],

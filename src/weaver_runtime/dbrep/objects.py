@@ -35,18 +35,17 @@ class WeaverObject:
 class Folder(WeaverObject):
     """A managed file collection. Implement :meth:`read`.
 
-    ``read()`` returns the triplet ``(staging_folder, file_names_to_delete,
-    messages)``: a Weaver-issued :class:`StagingFolder` of files to create or
-    update, a sequence of relative file names to delete, and a sequence of
-    supplementary structured messages. Weaver reconciles the staged files into
+    ``read()`` returns ``(staging_folder, file_names_to_delete)``: a Weaver-issued
+    :class:`StagingFolder` of files to create or update and a sequence of relative
+    file names to delete. Weaver reconciles the staged files into
     the destination and counts file CRUD; object code must not write to the
-    destination (``self.context.object_path``) directly. The triplet may be
+    destination (``self.context.object_path``) directly. The pair may be
     returned inside or after the ``with self.staging_folder()`` block::
 
         def read(self):
             with self.staging_folder() as staging_folder:
                 download_and_prepare_files(staging_folder.path)
-            return staging_folder, ("unwanted.json",), ()
+            return staging_folder, ("unwanted.json",)
     """
 
     kind = FOLDER
@@ -63,16 +62,15 @@ class Folder(WeaverObject):
 class Table(WeaverObject):
     """A managed table object. Implement :meth:`read`.
 
-    ``read(spark)`` returns the triplet ``(staging_dataframe,
-    primary_key_values_to_delete, messages)``: a Spark DataFrame of rows to
-    insert or update, a sequence of primary-key tuples identifying rows to delete
-    (in declared primary-key column order), and a sequence of supplementary
-    structured messages. Explicit deletion requires a declared primary key and
+    ``read(spark)`` returns ``(staging_dataframe,
+    primary_key_values_to_delete)``: a Spark DataFrame of rows to insert or update
+    and a sequence of primary-key tuples identifying rows to delete (in declared
+    primary-key column order). Explicit deletion requires a declared primary key and
     cannot be combined with ``Auto delete: true``. ``schema`` may declare an
     ordered ``{column: type}`` mapping used to enforce and cast the frame::
 
         def read(self, spark):
-            return build_customer_orders(spark), (("order-17",),), ()
+            return build_customer_orders(spark), (("order-17",),)
     """
 
     kind = TABLE

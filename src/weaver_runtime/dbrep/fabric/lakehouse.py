@@ -31,6 +31,8 @@ class FabricBuildResult:
     lakehouse: str
     uploaded: int
     runtime_root: str
+    environment: str | None = None
+    environment_id: str | None = None
     result: dict | None = None
 
 
@@ -46,6 +48,13 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
     results: list[FabricBuildResult] = []
     for group in group_lakehouse_objects_by_host(fabric_plan, fabric=True):
         representative = group.pairs[0].target
+        environment_names = {pair.target.environment for pair in group.pairs if pair.target.environment}
+        if len(environment_names) > 1:
+            raise ValueError(
+                "grouped Fabric Lakehouse targets require one effective Environment; got "
+                + ", ".join(sorted(environment_names))
+            )
+        environment_name = next(iter(environment_names), None)
         with tempfile.TemporaryDirectory(prefix="weaver_fabric_stage_") as tmp:
             host_plan = replace(plan, pairs=group.pairs)
             (artifact,) = generate_lakehouse_artifacts(host_plan, Path(tmp))
@@ -55,7 +64,9 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
             )
             uploaded = onelake.sync_runtime_folder(artifact.files_root, resolved)
 
-            result = _run_program(resolved, artifact.program)
+            result, environment_id = _run_program(
+                resolved, artifact.program, environment_name=environment_name
+            )
 
             _publish_completion_record(resolved, completion_record(group, result))
 
@@ -66,6 +77,8 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
                     lakehouse=resolved["lakehouse_name"],
                     uploaded=uploaded,
                     runtime_root="Files/_weaver/runtime",
+                    environment=environment_name,
+                    environment_id=environment_id,
                     result=result,
                 )
             )
@@ -95,12 +108,17 @@ def load_fabric_lakehouse(
         include_static=include_static,
         strict=strict,
     )
-    report = _run_program(resolved, program, poll_interval=poll_interval, timeout=timeout)
+    report, environment_id = _run_program(
+        resolved, program, environment_name=target.environment,
+        poll_interval=poll_interval, timeout=timeout
+    )
     return {
         "target": target.alias,
         "type": "Fabric Lakehouse",
         "workspace": resolved["workspace_name"],
         "lakehouse": resolved["lakehouse_name"],
+        "environment": target.environment,
+        "environment_id": environment_id,
         "executed": True,
         "report": report,
     }
@@ -112,22 +130,29 @@ def _run_program(
     *,
     poll_interval: float = 10.0,
     timeout: float = 1800.0,
-) -> dict:
+    environment_name: str | None = None,
+) -> tuple[dict, str | None]:
     """Submit a generated Weaver program through the generic Livy runtime."""
 
     import os
 
-    from weaver_runtime.fabric import auth, livy
+    from weaver_runtime.fabric import auth, livy, resources
     from weaver_runtime.fabric.settings import resolve_settings
 
     settings = resolve_settings()
     # Optionally attach a Fabric Spark Environment (for pip libraries the default
     # runtime lacks) so the same generated program can run where deps are needed.
-    environment_id = os.environ.get("WEAVER_FABRIC_ENVIRONMENT_ID") or None
-    return livy.run_runtime_program(
+    token = auth.get_token(settings.fabric_scope)
+    environment_id = (
+        resources.resolve_environment_id(
+            token, resolved["workspace_id"], environment_name, settings.api_base_url
+        )
+        if environment_name else os.environ.get("WEAVER_FABRIC_ENVIRONMENT_ID") or None
+    )
+    result = livy.run_runtime_program(
         resolved["workspace_id"],
         resolved["lakehouse_id"],
-        auth.get_token(settings.fabric_scope),
+        token,
         program,
         api_base_url=settings.api_base_url,
         api_version=settings.livy_api_version,
@@ -135,6 +160,7 @@ def _run_program(
         timeout=timeout,
         environment_id=environment_id,
     )
+    return result, environment_id
 
 
 def _publish_completion_record(resolved, record: dict) -> None:

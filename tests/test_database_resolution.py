@@ -23,13 +23,16 @@ def _config(base_dir: str = "/cfg"):
         {
             "version": 1,
             "servers": {
-                "SES_Repo": {"server": "/path/to/repo/SES"},
-                "Local_Lakehouse": {"server": ".local/lakehouse/T1"},
+                "SES_Repo": {"type": "SES", "server": "/path/to/repo/SES"},
+                "Local_Lakehouse": {"type": "Local Lakehouse", "server": ".local/lakehouse/T1"},
                 "Fabric_SQL_Server": {
+                    "type": "SQL",
                     "server": "endpoint.example.fabric.microsoft.com",
                     "degrees_of_parallelism": 8,
                 },
-                "Fabric_Lakehouse": {"server": "Workspace/T1", "platform": "fabric"},
+                "Fabric_Lakehouse": {
+                    "type": "Fabric Lakehouse", "server": "Workspace/T1"
+                },
             },
         },
         base_dir=base_dir,
@@ -112,9 +115,6 @@ def test_fabric_delta_materialisation_omits_database() -> None:
     config = _config()
     fabric = resolve_database(config.get("T1_FABRIC_DELTA"), config.environment)
     # The Fabric Lakehouse is the database host: no database path component.
-    assert delta_table_path(fabric, "Stage", "Record") == (
-        filesystem_host(fabric) / "Tables" / "Stage" / "Record"
-    )
     assert delta_materialisation("T1", "Stage", "Record", fabric=True) == "Tables/Stage/Record"
     assert delta_materialisation("T1", "Mart", "RecordAudit", fabric=True) == "Tables/Mart/RecordAudit"
 

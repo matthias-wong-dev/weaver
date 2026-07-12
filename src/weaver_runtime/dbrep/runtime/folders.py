@@ -1,10 +1,9 @@
 """Folder staging contract and reconciliation (pure filesystem, no PySpark).
 
 A Folder object produces files by writing them into a Weaver-issued *staging*
-directory and returning the standard triplet ``(staging_folder, delete, messages)``:
+directory and returning the standard pair ``(staging_folder, delete)``:
 everything under the staging folder is upserted, the explicit relative paths are
-deleted, and the messages are supplementary log context. Weaver owns the
-destination — it validates the triplet, reconciles the staged files against the
+deleted. Weaver owns the destination — it validates the result, reconciles the staged files against the
 destination, counts file-level CRUD, and cleans the staging folder.
 
 Reconciliation scans only the staged folder and the exact destination paths that
@@ -23,7 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..errors import LoadError
-from .logging import FILES, CrudCounts, require_triplet, validate_messages
+from .logging import FILES, CrudCounts, require_load_pair
 
 # Weaver-owned files that object code may never stage, replace, or delete.
 RESERVED_NAMES = frozenset({"_weaver.json"})
@@ -36,9 +35,9 @@ class StagingFolder:
 
     The directory is created up front and exposed as :attr:`path`. Used as a
     context manager it is removed on an *exceptional* exit and preserved on a
-    normal exit, so object code may return the triplet either inside or after the
+    normal exit, so object code may return the pair either inside or after the
     ``with`` block with identical behaviour. Weaver consumes the folder once (via
-    :func:`validate_folder_triplet`) and removes it after reconciliation.
+    :func:`validate_folder_result`) and removes it after reconciliation.
     """
 
     def __init__(self, path: Path):
@@ -65,24 +64,23 @@ def new_staging_folder(staging_root: Path) -> StagingFolder:
 # --- Validation ------------------------------------------------------------
 
 
-def validate_folder_triplet(
+def validate_folder_result(
     result,
     *,
     issued: Iterable[StagingFolder],
     destination: Path | None = None,
-) -> tuple[Path, tuple[str, ...], tuple[dict, ...]]:
-    """Validate a ``Folder.read()`` triplet before any destination mutation.
+) -> tuple[Path, tuple[str, ...]]:
+    """Validate a ``Folder.read()`` result before any destination mutation.
 
-    Returns ``(upsert_path, delete, messages)`` normalised for reconciliation.
+    Returns ``(upsert_path, delete)`` normalised for reconciliation.
     Enforces that the first item is the StagingFolder Weaver issued to this
     object (unconsumed, still on disk), that every delete entry is an exact
     relative file path (never absolute, traversing, a glob, a directory, or a
-    reserved Weaver file), that nothing is both staged and deleted, and that all
-    messages are structurally valid. Raises :class:`LoadError` on the first
-    violation and marks the folder consumed on success.
+    reserved Weaver file), and that nothing is both staged and deleted. Raises
+    :class:`LoadError` on the first violation and marks the folder consumed.
     """
 
-    staging_folder, delete_names, messages = require_triplet(result, "Folder")
+    staging_folder, delete_names = require_load_pair(result, "Folder")
 
     if not isinstance(staging_folder, StagingFolder):
         raise LoadError(
@@ -104,10 +102,8 @@ def validate_folder_triplet(
             raise LoadError(f"reserved Weaver file cannot be staged: {relative}")
 
     deletes = _validate_delete_paths(delete_names, staged, destination)
-    validated_messages = validate_messages(messages)
-
     staging_folder._consumed = True
-    return staging_folder.path, deletes, validated_messages
+    return staging_folder.path, deletes
 
 
 def _validate_delete_paths(delete, staged: set[str], destination) -> tuple[str, ...]:

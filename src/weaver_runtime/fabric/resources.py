@@ -104,3 +104,22 @@ def resolve_item_id(
         if item.get("type") == item_type and item.get("displayName") == item_name:
             return str(item["id"])
     return None
+
+
+def resolve_environment_id(
+    token: str,
+    workspace_id: str,
+    environment_name: str,
+    api_base_url: str = DEFAULT_API_BASE_URL,
+) -> str:
+    """Resolve one Fabric Environment artefact name to its item ID."""
+
+    matches = [
+        item for item in list_items(token, workspace_id, api_base_url)
+        if item.get("type") == "Environment" and item.get("displayName") == environment_name
+    ]
+    if len(matches) == 1:
+        return str(matches[0]["id"])
+    if not matches:
+        raise ResourceError(f"environment not found: {environment_name!r}")
+    raise ResourceError(f"multiple environments named {environment_name!r}")

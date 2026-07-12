@@ -9,10 +9,17 @@ Example::
     version: 1
     servers:
       Repo:
+        type: SES
         server: /path/to/repo/SES
       Local_Lakehouse:
+        type: Local Lakehouse
         server: .local/lakehouse/Warehouse
+      Fabric_Lakehouse:
+        type: Fabric Lakehouse
+        server: Workspace/Warehouse
+        environment: Python Libraries
       Warehouse_SQL:
+        type: SQL
         server: endpoint.example.fabric.microsoft.com
         degrees_of_parallelism: 8
 """
@@ -27,26 +34,35 @@ import yaml
 
 from ..errors import ConfigError
 
-_ALLOWED_SERVER_KEYS = {"server", "degrees_of_parallelism", "platform"}
-_ALLOWED_PLATFORMS = {"local", "fabric"}
+SES_SERVER = "SES"
+LOCAL_LAKEHOUSE_SERVER = "Local Lakehouse"
+FABRIC_LAKEHOUSE_SERVER = "Fabric Lakehouse"
+SQL_SERVER = "SQL"
+SERVER_TYPES = frozenset(
+    {SES_SERVER, LOCAL_LAKEHOUSE_SERVER, FABRIC_LAKEHOUSE_SERVER, SQL_SERVER}
+)
+_COMMON_KEYS = {"type", "degrees_of_parallelism"}
+_TYPE_KEYS = {
+    SES_SERVER: {"server"},
+    LOCAL_LAKEHOUSE_SERVER: {"server"},
+    FABRIC_LAKEHOUSE_SERVER: {"server", "environment"},
+    SQL_SERVER: {"server"},
+}
 
 
 @dataclass(frozen=True)
 class ServerConfig:
     """A single host/server alias.
 
-    ``server`` is a raw host value. Its meaning depends on the database
-    representation that points at it: a filesystem parent for SES, a Lakehouse
-    host for Files/Delta, or a SQL endpoint for SQL.
-
-    ``platform`` is ``local`` (filesystem, the default) or ``fabric`` (OneLake /
-    Fabric Spark). For a Fabric Lakehouse host, ``server`` is ``Workspace/Lakehouse``.
+    The explicit ``type`` determines whether ``server`` is a local path or SQL
+    endpoint, local path, or encoded ``Workspace/Lakehouse`` Fabric host.
     """
 
     alias: str
-    server: str
+    type: str
+    server: str | None = None
+    environment: str | None = None
     degrees_of_parallelism: int | None = None
-    platform: str = "local"
 
 
 @dataclass(frozen=True)
@@ -109,16 +125,36 @@ def _parse_server(alias: str, raw: Any) -> ServerConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"server {alias!r} must be a mapping")
 
-    unknown = set(raw) - _ALLOWED_SERVER_KEYS
+    type_value = raw.get("type")
+    if type_value not in SERVER_TYPES:
+        raise ConfigError(
+            f"server {alias!r} type must be one of {', '.join(sorted(SERVER_TYPES))}"
+        )
+
+    allowed = _COMMON_KEYS | _TYPE_KEYS[type_value]
+    unknown = set(raw) - allowed
     if unknown:
         raise ConfigError(
             f"server {alias!r} has keys that do not belong in environment config: "
             + ", ".join(sorted(unknown))
         )
 
-    server = raw.get("server")
-    if not isinstance(server, str) or not server.strip():
-        raise ConfigError(f"server {alias!r} must define a non-empty 'server' value")
+    values: dict[str, str | None] = {}
+    required = ("server",)
+    for key in required:
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"server {alias!r} must define a non-empty {key!r} value")
+        values[key] = value.strip()
+    if type_value == FABRIC_LAKEHOUSE_SERVER:
+        parts = values["server"].split("/", 1)
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ConfigError(
+                f"server {alias!r} must use a non-empty 'Workspace/Lakehouse' value"
+            )
+    environment = raw.get("environment")
+    if environment is not None and (not isinstance(environment, str) or not environment.strip()):
+        raise ConfigError(f"server {alias!r} environment must be a non-empty string")
 
     dop = raw.get("degrees_of_parallelism")
     if dop is not None:
@@ -127,15 +163,10 @@ def _parse_server(alias: str, raw: Any) -> ServerConfig:
                 f"server {alias!r} degrees_of_parallelism must be a positive integer"
             )
 
-    platform = raw.get("platform", "local")
-    if platform not in _ALLOWED_PLATFORMS:
-        raise ConfigError(
-            f"server {alias!r} platform must be one of {', '.join(sorted(_ALLOWED_PLATFORMS))}"
-        )
-
     return ServerConfig(
         alias=alias,
-        server=server.strip(),
+        type=type_value,
+        server=values.get("server"),
+        environment=environment.strip() if environment else None,
         degrees_of_parallelism=dop,
-        platform=platform,
     )

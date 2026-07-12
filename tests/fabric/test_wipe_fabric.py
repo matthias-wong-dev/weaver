@@ -103,7 +103,7 @@ def test_lakehouse_wipe_deletes_files_and_tables(tmp_path: Path, fabric_lakehous
 
     weaver = write_config_files(
         tmp_path,
-        {"LH": {"server": f"{workspace}/{lakehouse}", "platform": "fabric"}},
+        {"LH": {"type": "Fabric Lakehouse", "server": f"{workspace}/{lakehouse}"}},
         {
             "T0_FILES": {"type": "Files", "server": "LH", "database": "T0"},
             "T1_DELTA": {"type": "Delta", "server": "LH", "database": "T1"},

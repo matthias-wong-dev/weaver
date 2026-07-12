@@ -35,10 +35,7 @@ class Raw__First(Folder):
     def read(self):
         with self.staging_folder() as staging:
             (staging.path / "first.csv").write_text("id\\n1\\n", encoding="utf-8")
-        messages = (
-            {"level": "info", "message": "staged first", "fields": {"watermark": "w1"}},
-        )
-        return staging, (), messages
+        return staging, ()
 '''
 
 SECOND = '''"""
@@ -56,7 +53,7 @@ class Raw__Second(Folder):
         # Weaver can still consume it (identical to returning after the block).
         with self.staging_folder() as staging:
             (staging.path / "second.csv").write_text("id\\n2\\n", encoding="utf-8")
-            return staging, (), ()
+            return staging, ()
 '''
 
 SECOND_FAILS = '''"""
@@ -138,7 +135,7 @@ def test_names_live_in_json_not_filenames_and_share_workflow_id(tmp_path: Path) 
             assert token not in step_file.name
 
 
-def test_folder_logs_use_unit_files_and_preserve_messages(tmp_path: Path) -> None:
+def test_folder_logs_use_unit_files_without_custom_messages(tmp_path: Path) -> None:
     runtime = _install_files_runtime(tmp_path, {"Raw__First": FIRST, "Raw__Second": SECOND})
     report = load_target_runtime(runtime, execute=True)
 
@@ -148,15 +145,9 @@ def test_folder_logs_use_unit_files_and_preserve_messages(tmp_path: Path) -> Non
     assert first.status == "success"
     assert first.crud.unit == "files"
     assert (first.crud.read, first.crud.created) == (1, 1)
-    assert first.messages == (
-        {"level": "info", "message": "staged first", "fields": {"watermark": "w1"}},
-    )
-
     record = _records_by_object(Path(report.log_dir))["T0.Raw.First"]
     assert record["crud"]["unit"] == "files"
-    assert record["messages"] == [
-        {"level": "info", "message": "staged first", "fields": {"watermark": "w1"}}
-    ]
+    assert "messages" not in record
 
 
 def test_table_kind_maps_to_rows_unit() -> None:

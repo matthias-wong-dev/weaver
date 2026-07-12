@@ -16,9 +16,10 @@ def _env_payload() -> dict:
     return {
         "version": 1,
         "servers": {
-            "SES_Repo": {"server": "/path/to/repo/SES"},
-            "Local_Lakehouse": {"server": ".local/lakehouse/T1"},
+            "SES_Repo": {"type": "SES", "server": "/path/to/repo/SES"},
+            "Local_Lakehouse": {"type": "Local Lakehouse", "server": ".local/lakehouse/T1"},
             "Fabric_SQL_Server": {
+                "type": "SQL",
                 "server": "endpoint.example.fabric.microsoft.com",
                 "degrees_of_parallelism": 8,
             },
@@ -32,12 +33,11 @@ def test_parses_servers_and_aliases() -> None:
     assert env.get("SES_Repo").server == "/path/to/repo/SES"
 
 
-def test_server_has_no_required_type() -> None:
+def test_server_requires_explicit_type() -> None:
     env = parse_environment_config(_env_payload(), base_dir="/tmp")
     ses_repo = env.get("SES_Repo")
     assert ses_repo.degrees_of_parallelism is None
-    # A bare server is valid with only a 'server' value.
-    assert ses_repo.server
+    assert ses_repo.type == "SES"
 
 
 def test_sql_server_degrees_of_parallelism_is_parsed() -> None:
@@ -45,10 +45,30 @@ def test_sql_server_degrees_of_parallelism_is_parsed() -> None:
     assert env.get("Fabric_SQL_Server").degrees_of_parallelism == 8
 
 
-def test_type_property_does_not_belong_in_environment() -> None:
+def test_fabric_lakehouse_fields_and_environment_are_parsed() -> None:
     payload = _env_payload()
-    payload["servers"]["SES_Repo"]["type"] = "SES"
-    with pytest.raises(ConfigError, match="do not belong in environment"):
+    payload["servers"]["Fabric"] = {
+        "type": "Fabric Lakehouse",
+        "server": "Workspace/Lakehouse",
+        "environment": "Python Libraries",
+    }
+    server = parse_environment_config(payload, base_dir="/tmp").get("Fabric")
+    assert (server.server, server.environment) == ("Workspace/Lakehouse", "Python Libraries")
+
+
+def test_fabric_lakehouse_rejects_malformed_server_field() -> None:
+    payload = _env_payload()
+    payload["servers"]["Fabric"] = {
+        "type": "Fabric Lakehouse", "server": "LakehouseOnly"
+    }
+    with pytest.raises(ConfigError, match="Workspace/Lakehouse"):
+        parse_environment_config(payload, base_dir="/tmp")
+
+
+def test_rejects_invalid_server_type() -> None:
+    payload = _env_payload()
+    payload["servers"]["SES_Repo"]["type"] = "Lakehouse"
+    with pytest.raises(ConfigError, match="type must be one of"):
         parse_environment_config(payload, base_dir="/tmp")
 
 
@@ -79,7 +99,7 @@ def test_requires_non_empty_servers() -> None:
 def test_load_from_file_sets_base_dir(tmp_path: Path) -> None:
     env_path = tmp_path / "env.yml"
     env_path.write_text(
-        "version: 1\nservers:\n  Repo:\n    server: SES\n",
+        "version: 1\nservers:\n  Repo:\n    type: SES\n    server: SES\n",
         encoding="utf-8",
     )
     env = load_environment_config(env_path)

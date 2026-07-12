@@ -3,15 +3,15 @@
 A Weaver object declares what it produces; Weaver owns how the change is applied,
 counted, and logged. Objects never mutate the target directly.
 
-Both object kinds share one endpoint shape: `read()` returns a three-item tuple
-of **proposed upserts, explicit deletes, and supplementary messages**.
+Both object kinds share one endpoint shape: `read()` returns a two-item tuple of
+**proposed upserts and explicit deletes**.
 
 ```text
-Folder.read()  -> staging_folder,    file_names_to_delete,          messages
-Table.read()   -> staging_dataframe, primary_key_values_to_delete,  messages
+Folder.read()  -> staging_folder,    file_names_to_delete
+Table.read()   -> staging_dataframe, primary_key_values_to_delete
 
 Weaver
-    validates      the triplet
+    validates      the pair
     reconciles     upserts and deletes against the target
     mutates        the target
     calculates     standard CRUD
@@ -32,8 +32,7 @@ class Source__Archive(Folder):
             download_and_prepare_files(staging_folder.path)
 
         file_names_to_delete = ("unwanted.json",)
-        messages = ({"level": "info", "message": "Source archive refreshed"},)
-        return staging_folder, file_names_to_delete, messages
+        return staging_folder, file_names_to_delete
 
 
 class Sales__CustomerOrder(Table):
@@ -41,11 +40,10 @@ class Sales__CustomerOrder(Table):
         staging_dataframe = build_customer_orders(spark)
 
         primary_key_values_to_delete = (("order-17",), ("order-29",))
-        messages = ({"level": "info", "message": "Customer orders prepared"},)
-        return staging_dataframe, primary_key_values_to_delete, messages
+        return staging_dataframe, primary_key_values_to_delete
 ```
 
-The normal no-delete case for either kind is `return upserts, (), ()`.
+The normal no-delete case for either kind is `return upserts, ()`.
 
 ## Workflow logging
 
@@ -65,21 +63,20 @@ Folder -> unit: files    read / created / updated / deleted
 Table  -> unit: rows     read / created / updated / deleted
 ```
 
-## The Folder triplet
+## The Folder pair
 
 1. a **`StagingFolder`** whose leaf files are created or updated in the target;
 2. a sequence of **relative file names to delete**;
-3. optional supplementary **messages**.
 
 Inside `staging_folder.path` use ordinary Python — `pathlib`, `shutil`,
 `requests`, `zipfile`, `pandas`, plain file writes. There are no special Weaver
-file-write methods. The triplet may be returned **inside or after** the `with`
+file-write methods. The pair may be returned **inside or after** the `with`
 block; both behave identically:
 
 ```python
 with self.staging_folder() as staging_folder:
     ...
-return staging_folder, (), ()
+return staging_folder, ()
 ```
 
 Weaver reconciles the staged files against the target and counts file CRUD
@@ -105,12 +102,11 @@ If object code raises inside the `with` block, Weaver cleans the staging folder
 automatically; on a normal return Weaver consumes and then cleans it after
 reconciliation.
 
-## The Table triplet
+## The Table pair
 
 1. a **Spark DataFrame** of rows to insert or update;
 2. a sequence of **primary-key tuples** identifying rows to delete, in declared
    primary-key column order;
-3. optional supplementary **messages**.
 
 ```python
 # single-column primary key
@@ -141,24 +137,3 @@ contain no null values, and are deduplicated; a key that is both staged and
 explicitly deleted is upserted (the delete is counted unmatched). Row CRUD counts
 `deleted` for rows actually removed; details add `accepted`, `rejected`,
 `auto_delete_ran`, and `explicit_delete_keys_read`/`matched`/`unmatched`.
-
-## Supplementary messages
-
-The third triplet item is a sequence of small structured mappings, identical for
-both kinds. Each message has a required `level` (`info` or `warning`), a required
-non-empty `message`, and an optional `fields` mapping — and must be
-JSON-serialisable:
-
-```python
-messages = (
-    {
-        "level": "info",
-        "message": "Source prepared",
-        "fields": {"snapshot_date": "2026-07-11"},
-    },
-)
-```
-
-Messages add operational context; they never replace or redefine the
-Weaver-owned CRUD counts. Errors are captured centrally from exceptions, not
-supplied as messages.

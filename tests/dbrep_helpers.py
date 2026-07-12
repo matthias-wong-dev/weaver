@@ -55,7 +55,7 @@ def write_python_table(
         f"class {schema}__{obj}(Table):\n"
         f"    def read(self, spark):\n"
         f"{dep_lines}\n"
-        f"        return None, (), ()\n"
+        f"        return None, ()\n"
     )
     path = folder / f"{schema}__{obj}.py"
     path.write_text(source, encoding="utf-8")
@@ -80,7 +80,7 @@ def write_python_folder(
         f"    def read(self):\n"
         f"        with self.staging_folder() as staging:\n"
         f"{dep_lines}\n"
-        f"        return staging, (), ()\n"
+        f"        return staging, ()\n"
     )
     path = folder / f"{schema}__{obj}.py"
     path.write_text(source, encoding="utf-8")
@@ -115,9 +115,8 @@ def make_config(
     """Build a DatabasesConfig from in-memory server/database mappings."""
 
     base = base_dir or tmp_path
-    environment = parse_environment_config(
-        {"version": 1, "servers": servers}, base_dir=base
-    )
+    servers = _with_server_types(servers, databases)
+    environment = parse_environment_config({"version": 1, "servers": servers}, base_dir=base)
     return parse_databases_config(
         {"version": 1, "databases": databases}, environment, base_dir=base
     )
@@ -132,6 +131,7 @@ def write_config_files(tmp_path: Path, servers: dict, databases: dict) -> Path:
 
     import yaml
 
+    servers = _with_server_types(servers, databases)
     (tmp_path / "env.yml").write_text(
         yaml.safe_dump({"version": 1, "servers": servers}, sort_keys=False),
         encoding="utf-8",
@@ -144,6 +144,27 @@ def write_config_files(tmp_path: Path, servers: dict, databases: dict) -> Path:
     weaver_path = tmp_path / "weaver.yml"
     weaver_path.write_text(yaml.safe_dump(weaver, sort_keys=False), encoding="utf-8")
     return weaver_path
+
+
+def _with_server_types(servers: dict, databases: dict) -> dict:
+    """Keep test setup terse while emitting the required explicit server types."""
+
+    result = {alias: dict(value) for alias, value in servers.items()}
+    used_types = {
+        alias: {db["type"] for db in databases.values() if db["server"] == alias}
+        for alias in result
+    }
+    for alias, server in result.items():
+        if "type" in server:
+            continue
+        types = used_types[alias]
+        if types == {"SES"}:
+            server["type"] = "SES"
+        elif types <= {"Files", "Delta"}:
+            server["type"] = "Local Lakehouse"
+        elif types == {"SQL"}:
+            server["type"] = "SQL"
+    return result
 
 
 def load_config(weaver_path: Path):

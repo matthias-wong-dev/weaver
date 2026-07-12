@@ -35,7 +35,7 @@ def _write_fixture(root: Path) -> None:
                             "record_id,group_id,amount\\nr1,A,10\\nr2,A,20\\nr3,B,30\\n",
                             encoding="utf-8",
                         )
-                    return staging, (), ()
+                    return staging, ()
             '''
         ),
         encoding="utf-8",
@@ -60,7 +60,7 @@ def _write_fixture(root: Path) -> None:
             class Stage__Record(Table):
                 def read(self, spark):
                     drop = self.repo["T0.Raw.Drop"]
-                    return spark.read.option("header", True).csv(f"{drop}/drop.csv"), (), ()
+                    return spark.read.option("header", True).csv(f"{drop}/drop.csv"), ()
             '''
         ),
         encoding="utf-8",
@@ -83,7 +83,7 @@ def _write_fixture(root: Path) -> None:
                 def read(self, spark):
                     from pyspark.sql import functions as F
                     stage = self.repo["T1.Stage.Record"]
-                    return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), (), ()
+                    return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), ()
             '''
         ),
         encoding="utf-8",
@@ -137,12 +137,12 @@ def _write_fixture(root: Path) -> None:
 
 def _config(tmp_path: Path, sql_target, lakehouse_target) -> Path:
     servers = {
-        "SES_Repo": {"server": str(tmp_path / "SES")},
+        "SES_Repo": {"type": "SES", "server": str(tmp_path / "SES")},
         "Fabric_LH": {
+            "type": "Fabric Lakehouse",
             "server": f"{lakehouse_target['workspace']}/{lakehouse_target['lakehouse']}",
-            "platform": "fabric",
         },
-        "Warehouse": {"server": sql_target["server"], "degrees_of_parallelism": sql_target["dop"]},
+        "Warehouse": {"type": "SQL", "server": sql_target["server"], "degrees_of_parallelism": sql_target["dop"]},
     }
     databases = {
         "T0_SES": {"type": "SES", "server": "SES_Repo", "database": "T0"},

@@ -24,4 +24,4 @@ class Raw__Drop(Folder):
                     encoding="utf-8",
                 )
 
-        return staging, (), ()
+        return staging, ()

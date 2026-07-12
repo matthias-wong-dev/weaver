@@ -55,7 +55,7 @@ def _folder_object(schema: str, obj: str, *, class_name: str | None = None) -> s
             def read(self):
                 with self.staging_folder() as staging:
                     pass
-                return staging, (), ()
+                return staging, ()
         '''
     )
 

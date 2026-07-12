@@ -91,7 +91,7 @@ current at time of writing; re-grep if they've drifted.
 | File | Why |
 | --- | --- |
 | `src/weaver_runtime/dbrep/config/databases.py` | `databases:` block parsing → `DatabaseConfig`. Named representations with `type`/`server`/`database`. |
-| `src/weaver_runtime/dbrep/config/environment.py` | `servers:` block → `ServerConfig` (`server`, `degrees_of_parallelism`, `platform: local|fabric`). |
+| `src/weaver_runtime/dbrep/config/environment.py` | `servers:` block → explicit typed `ServerConfig` (`SES`, `Local Lakehouse`, `Fabric Lakehouse`, or `SQL`). |
 | `src/weaver_runtime/dbrep/config/resolution.py` | `ResolvedDatabase` (+ `is_sql`/`is_delta`/`is_files`/`is_lakehouse`/`is_fabric`), `RUNTIME_RELATIVE_ROOT`, path helpers. The metadata-Lakehouse reference resolves through here. |
 | `tests/dbrep_helpers.py` (`write_config_files`), `tests/fixtures/generic_ses/{env.yml,weaver.yml}` | The config shape used by tests. |
 

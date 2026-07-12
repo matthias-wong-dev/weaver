@@ -65,7 +65,7 @@ class LoadContext:
         """Issue a fresh, empty staging directory beneath the workflow root.
 
         Object code writes its retained output into ``staging.path`` and returns
-        the ``(staging_folder, delete, messages)`` triplet; Weaver reconciles the
+        the ``(staging_folder, delete)`` pair; Weaver reconciles the
         staged files into the destination and calculates file CRUD.
         """
 

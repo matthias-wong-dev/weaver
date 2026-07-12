@@ -108,7 +108,16 @@ def generate_lakehouse_artifacts(plan, out_dir) -> list[LakehouseHostArtifact]:
     for group in groups:
         host_root = out_dir / group.server
         staged_pairs = tuple(
-            BuildPair(pair.source, replace(pair.target, host=str(host_root), platform="local"))
+            BuildPair(
+                pair.source,
+                replace(
+                    pair.target,
+                    host=str(host_root),
+                    server_type="Local Lakehouse",
+                    fabric_workspace=None,
+                    fabric_lakehouse=None,
+                ),
+            )
             for pair in group.pairs
         )
         install_build(replace(plan, pairs=staged_pairs))

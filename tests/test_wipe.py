@@ -10,11 +10,14 @@ from weaver_runtime.dbrep.errors import LoadError
 
 
 def _config(tmp_path: Path):
-    servers = {"Lake": {"server": str(tmp_path / "lake")}}
+    servers = {
+        "Lake": {"type": "Local Lakehouse", "server": str(tmp_path / "lake")},
+        "Repo": {"type": "SES", "server": str(tmp_path / "lake")},
+    }
     databases = {
         "T0_FILES": {"type": "Files", "server": "Lake", "database": "T0"},
         "T1_DELTA": {"type": "Delta", "server": "Lake", "database": "T1"},
-        "SES": {"type": "SES", "server": "Lake", "database": "src"},
+        "SES": {"type": "SES", "server": "Repo", "database": "src"},
     }
     return make_config(tmp_path, servers, databases)
 
@@ -23,7 +26,10 @@ def _write_config_file(tmp_path: Path) -> Path:
     import yaml
 
     (tmp_path / "env.yml").write_text(
-        yaml.safe_dump({"version": 1, "servers": {"Lake": {"server": str(tmp_path / "lake")}}}),
+        yaml.safe_dump({"version": 1, "servers": {
+            "Lake": {"type": "Local Lakehouse", "server": str(tmp_path / "lake")},
+            "Repo": {"type": "SES", "server": str(tmp_path / "lake")},
+        }}),
         encoding="utf-8",
     )
     weaver = {
@@ -32,7 +38,7 @@ def _write_config_file(tmp_path: Path) -> Path:
         "databases": {
             "T0_FILES": {"type": "Files", "server": "Lake", "database": "T0"},
             "T1_DELTA": {"type": "Delta", "server": "Lake", "database": "T1"},
-            "SES": {"type": "SES", "server": "Lake", "database": "src"},
+            "SES": {"type": "SES", "server": "Repo", "database": "src"},
         },
     }
     path = tmp_path / "weaver.yml"

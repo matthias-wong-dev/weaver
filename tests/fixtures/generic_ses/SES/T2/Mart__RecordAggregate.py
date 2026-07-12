@@ -16,4 +16,4 @@ class Mart__RecordAggregate(Table):
         from pyspark.sql import functions as F
 
         stage = self.repo["T1.Stage.Record"]
-        return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), (), ()
+        return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), ()

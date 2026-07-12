@@ -1,4 +1,4 @@
-"""Folder staging, triplet validation, and reconciliation (no Spark)."""
+"""Folder staging, pair validation, and reconciliation (no Spark)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from weaver_runtime.dbrep.runtime.folders import (
     apply_folder_result,
     new_staging_folder,
     staged_relative_files,
-    validate_folder_triplet,
+    validate_folder_result,
 )
 
 
@@ -38,10 +38,8 @@ def _stage(staging_root: Path, files: dict[str, str]) -> StagingFolder:
     return staging
 
 
-def _validate(staging: StagingFolder, *, delete=(), messages=(), destination=None):
-    return validate_folder_triplet(
-        (staging, delete, messages), issued=[staging], destination=destination
-    )
+def _validate(staging: StagingFolder, *, delete=(), destination=None):
+    return validate_folder_result((staging, delete), issued=[staging], destination=destination)
 
 
 # --- Staging-folder lifecycle ----------------------------------------------
@@ -65,14 +63,14 @@ def test_exceptional_context_exit_cleans_staging(tmp_path: Path) -> None:
 def test_return_inside_and_outside_with_are_equivalent(tmp_path: Path) -> None:
     # Return-after-with (staging created, block exits normally, then validated).
     outside = _stage(tmp_path / "s1", {"a.csv": "one"})
-    up1, del1, _ = _validate(outside)
+    up1, del1 = _validate(outside)
     counts_outside = apply_folder_result(up1, del1, tmp_path / "d1")
 
     # Return-inside-with: identical because normal exit also preserves.
     with new_staging_folder(tmp_path / "s2") as inside:
         (inside.path / "a.csv").write_text("one", encoding="utf-8")
-        triplet = (inside, (), ())
-    up2, del2, _ = validate_folder_triplet(triplet, issued=[inside], destination=tmp_path / "d2")
+        pair = (inside, ())
+    up2, del2 = validate_folder_result(pair, issued=[inside], destination=tmp_path / "d2")
     counts_inside = apply_folder_result(up2, del2, tmp_path / "d2")
 
     assert counts_outside == counts_inside
@@ -88,46 +86,45 @@ def test_context_cleanup_staging_removes_issued_dirs(tmp_path: Path) -> None:
     assert not first.path.exists() and not second.path.exists()
 
 
-# --- Shared triplet shape --------------------------------------------------
+# --- Shared pair shape -----------------------------------------------------
 
 
-def test_valid_triplet_accepted(tmp_path: Path) -> None:
+def test_valid_pair_accepted(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "one"})
-    upsert_path, deletes, messages = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     assert upsert_path == staging.path
     assert deletes == ()
-    assert messages == ()
 
 
 def test_non_tuple_result_rejected(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    with pytest.raises(LoadError, match="exactly three values"):
-        validate_folder_triplet(staging, issued=[staging])
+    with pytest.raises(LoadError, match="exactly two values"):
+        validate_folder_result(staging, issued=[staging])
 
 
 def test_too_few_items_rejected(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    with pytest.raises(LoadError, match="exactly three values"):
-        validate_folder_triplet((staging, ()), issued=[staging])
+    with pytest.raises(LoadError, match="exactly two values"):
+        validate_folder_result((staging,), issued=[staging])
 
 
 def test_too_many_items_rejected(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    with pytest.raises(LoadError, match="exactly three values"):
-        validate_folder_triplet((staging, (), (), ()), issued=[staging])
+    with pytest.raises(LoadError, match="exactly two values"):
+        validate_folder_result((staging, (), ()), issued=[staging])
 
 
 def test_first_item_must_be_staging_folder(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
     with pytest.raises(LoadError, match="StagingFolder"):
-        validate_folder_triplet((staging.path, (), ()), issued=[staging])
+        validate_folder_result((staging.path, ()), issued=[staging])
 
 
 def test_unissued_staging_folder_rejected(tmp_path: Path) -> None:
     issued = _stage(tmp_path / "issued", {"a.csv": "x"})
     other = _stage(tmp_path / "other", {"a.csv": "x"})
     with pytest.raises(LoadError, match="did not issue"):
-        validate_folder_triplet((other, (), ()), issued=[issued])
+        validate_folder_result((other, ()), issued=[issued])
 
 
 def test_already_consumed_staging_folder_rejected(tmp_path: Path) -> None:
@@ -135,40 +132,6 @@ def test_already_consumed_staging_folder_rejected(tmp_path: Path) -> None:
     _validate(staging)  # first consumption marks it consumed
     with pytest.raises(LoadError, match="already consumed"):
         _validate(staging)
-
-
-# --- Message validation ----------------------------------------------------
-
-
-def test_valid_message_with_fields_accepted(tmp_path: Path) -> None:
-    staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    message = {"level": "info", "message": "done", "fields": {"snapshot": "2026-07-11"}}
-    _, _, messages = _validate(staging, messages=[message])
-    assert messages == (message,)
-
-
-def test_bad_message_level_rejected(tmp_path: Path) -> None:
-    staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    with pytest.raises(LoadError, match="level"):
-        _validate(staging, messages=[{"level": "debug", "message": "x"}])
-
-
-def test_unknown_message_key_rejected(tmp_path: Path) -> None:
-    staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    with pytest.raises(LoadError, match="subset"):
-        _validate(staging, messages=[{"level": "info", "message": "x", "watermark": "w"}])
-
-
-def test_non_serialisable_message_rejected_before_mutation(tmp_path: Path) -> None:
-    destination = tmp_path / "dest"
-    destination.mkdir()
-    (destination / "drop.csv").write_text("orig", encoding="utf-8")
-
-    staging = _stage(tmp_path / "staging", {"drop.csv": "new"})
-    bad = {"level": "info", "message": "x", "fields": {"handle": object()}}
-    with pytest.raises(LoadError):
-        _validate(staging, messages=[bad])
-    assert (destination / "drop.csv").read_text() == "orig"  # never mutated
 
 
 # --- Delete-path validation ------------------------------------------------
@@ -229,7 +192,7 @@ def test_trailing_slash_delete_rejected(tmp_path: Path) -> None:
 
 def test_new_staged_file_is_created(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "one"})
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     counts = apply_folder_result(upsert_path, deletes, tmp_path / "dest")
     assert (counts.read, counts.created, counts.updated) == (1, 1, 0)
     assert (tmp_path / "dest" / "a.csv").read_text() == "one"
@@ -241,7 +204,7 @@ def test_different_staged_file_is_updated(tmp_path: Path) -> None:
     (destination / "a.csv").write_text("old", encoding="utf-8")
 
     staging = _stage(tmp_path / "staging", {"a.csv": "new"})
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     counts = apply_folder_result(upsert_path, deletes, destination)
     assert (counts.read, counts.created, counts.updated) == (1, 0, 1)
     assert (destination / "a.csv").read_text() == "new"
@@ -253,7 +216,7 @@ def test_identical_staged_file_is_read_only(tmp_path: Path) -> None:
     (destination / "a.csv").write_text("same", encoding="utf-8")
 
     staging = _stage(tmp_path / "staging", {"a.csv": "same"})
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     counts = apply_folder_result(upsert_path, deletes, destination)
     assert (counts.read, counts.created, counts.updated) == (1, 0, 0)
 
@@ -264,7 +227,7 @@ def test_unwanted_file_is_deleted(tmp_path: Path) -> None:
     (destination / "unwanted.json").write_text("gone", encoding="utf-8")
 
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    upsert_path, deletes, _ = _validate(staging, delete=["unwanted.json"])
+    upsert_path, deletes = _validate(staging, delete=["unwanted.json"])
     counts = apply_folder_result(upsert_path, deletes, destination)
     assert counts.deleted == 1
     assert not (destination / "unwanted.json").exists()
@@ -272,7 +235,7 @@ def test_unwanted_file_is_deleted(tmp_path: Path) -> None:
 
 def test_absent_delete_counts_zero(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    upsert_path, deletes, _ = _validate(staging, delete=["missing.csv"])
+    upsert_path, deletes = _validate(staging, delete=["missing.csv"])
     counts = apply_folder_result(upsert_path, deletes, tmp_path / "dest")
     assert counts.deleted == 0
 
@@ -282,7 +245,7 @@ def test_nested_leaf_files_count_individually(tmp_path: Path) -> None:
         tmp_path / "staging", {"sub/a.csv": "1", "sub/deep/b.csv": "2", "c.csv": "3"}
     )
     assert staged_relative_files(staging.path) == ["c.csv", "sub/a.csv", "sub/deep/b.csv"]
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     counts = apply_folder_result(upsert_path, deletes, tmp_path / "dest")
     assert (counts.read, counts.created) == (3, 3)
 
@@ -291,21 +254,21 @@ def test_empty_directories_do_not_count(tmp_path: Path) -> None:
     staging = new_staging_folder(tmp_path / "staging")
     (staging.path / "empty").mkdir()
     (staging.path / "a.csv").write_text("x", encoding="utf-8")
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     counts = apply_folder_result(upsert_path, deletes, tmp_path / "dest")
     assert counts.read == 1
 
 
 def test_staging_cleaned_after_success(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     apply_folder_result(upsert_path, deletes, tmp_path / "dest")
     assert not staging.path.exists()
 
 
 def test_staging_cleaned_after_reconciliation_failure(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
-    upsert_path, deletes, _ = _validate(staging)
+    upsert_path, deletes = _validate(staging)
     destination = tmp_path / "dest_is_a_file"
     destination.write_text("blocking", encoding="utf-8")
     with pytest.raises(Exception):
