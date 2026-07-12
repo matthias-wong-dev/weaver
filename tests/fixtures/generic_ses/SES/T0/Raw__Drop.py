@@ -2,6 +2,8 @@
 Folder ID: Raw.Drop
 Description: Raw record drop folder.
 Lineage: Writes the current run's raw CSV into the landing folder.
+File key: "**/*.csv"
+Auto delete: false
 """
 
 import os

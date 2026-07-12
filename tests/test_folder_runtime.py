@@ -10,11 +10,41 @@ from weaver_runtime.dbrep.errors import LoadError
 from weaver_runtime.dbrep.runtime.context import LoadContext, Repo
 from weaver_runtime.dbrep.runtime.folders import (
     StagingFolder,
-    apply_folder_result,
+    apply_folder_result as _apply_folder_result,
+    managed_relative_files,
     new_staging_folder,
     staged_relative_files,
-    validate_folder_result,
+    validate_folder_result as _validate_folder_result,
 )
+
+
+def validate_folder_result(
+    result,
+    *,
+    issued,
+    destination=None,
+    file_keys=("**/*",),
+    auto_delete=False,
+):
+    return _validate_folder_result(
+        result,
+        issued=issued,
+        destination=destination,
+        file_keys=file_keys,
+        auto_delete=auto_delete,
+    )
+
+
+def apply_folder_result(
+    upsert_path, delete, destination, *, file_keys=("**/*",), auto_delete=False
+):
+    return _apply_folder_result(
+        upsert_path,
+        delete,
+        destination,
+        file_keys=file_keys,
+        auto_delete=auto_delete,
+    )
 
 
 def _context(staging_root: Path) -> LoadContext:
@@ -38,8 +68,21 @@ def _stage(staging_root: Path, files: dict[str, str]) -> StagingFolder:
     return staging
 
 
-def _validate(staging: StagingFolder, *, delete=(), destination=None):
-    return validate_folder_result((staging, delete), issued=[staging], destination=destination)
+def _validate(
+    staging: StagingFolder,
+    *,
+    delete=(),
+    destination=None,
+    file_keys=("**/*",),
+    auto_delete=False,
+):
+    return validate_folder_result(
+        (staging, delete),
+        issued=[staging],
+        destination=destination,
+        file_keys=file_keys,
+        auto_delete=auto_delete,
+    )
 
 
 # --- Staging-folder lifecycle ----------------------------------------------
@@ -187,6 +230,40 @@ def test_trailing_slash_delete_rejected(tmp_path: Path) -> None:
         _validate(staging, delete=["archive/"])
 
 
+def test_staged_files_must_all_match_file_keys(tmp_path: Path) -> None:
+    staging = _stage(tmp_path / "staging", {"a.csv": "x", "notes.txt": "no"})
+    with pytest.raises(LoadError, match=r"staged files do not match File key.*notes.txt"):
+        _validate(staging, file_keys=("**/*.csv",))
+
+
+def test_multiple_and_overlapping_file_keys_match_nested_files_once(tmp_path: Path) -> None:
+    staging = _stage(
+        tmp_path / "staging",
+        {"a.csv": "1", "nested/b.csv": "2", "nested/report.pdf": "3"},
+    )
+    assert managed_relative_files(
+        staging.path, ("**/*", "**/*.csv", "**/*.pdf")
+    ) == ["a.csv", "nested/b.csv", "nested/report.pdf"]
+    _validate(staging, file_keys=("**/*.csv", "**/*.pdf"))
+
+
+def test_explicit_delete_must_match_file_key(tmp_path: Path) -> None:
+    staging = _stage(tmp_path / "staging", {"a.csv": "x"})
+    with pytest.raises(LoadError, match="delete path does not match File key"):
+        _validate(staging, delete=["old.json"], file_keys=("**/*.csv",))
+
+
+def test_auto_delete_rejects_explicit_deletes(tmp_path: Path) -> None:
+    staging = _stage(tmp_path / "staging", {"a.csv": "x"})
+    with pytest.raises(LoadError, match="cannot return explicit deletes"):
+        _validate(
+            staging,
+            delete=["old.csv"],
+            file_keys=("**/*.csv",),
+            auto_delete=True,
+        )
+
+
 # --- Reconciliation --------------------------------------------------------
 
 
@@ -285,3 +362,61 @@ def test_destination_unchanged_when_validation_fails(tmp_path: Path) -> None:
     with pytest.raises(LoadError):
         _validate(staging, delete=["/absolute.csv"], destination=destination)
     assert (destination / "a.csv").read_text() == "orig"
+
+
+def test_auto_delete_false_retains_unstaged_managed_files(tmp_path: Path) -> None:
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    (destination / "old.csv").write_text("keep", encoding="utf-8")
+    staging = _stage(tmp_path / "staging", {"new.csv": "new"})
+    upsert_path, deletes = _validate(staging, file_keys=("**/*.csv",))
+    counts = apply_folder_result(
+        upsert_path,
+        deletes,
+        destination,
+        file_keys=("**/*.csv",),
+        auto_delete=False,
+    )
+    assert counts.deleted == 0
+    assert (destination / "old.csv").is_file()
+
+
+def test_auto_delete_true_deletes_only_missing_managed_files(tmp_path: Path) -> None:
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    (destination / "old.csv").write_text("gone", encoding="utf-8")
+    (destination / "notes.txt").write_text("outside", encoding="utf-8")
+    staging = _stage(tmp_path / "staging", {"new.csv": "new"})
+    upsert_path, deletes = _validate(
+        staging, file_keys=("**/*.csv",), auto_delete=True
+    )
+    counts = apply_folder_result(
+        upsert_path,
+        deletes,
+        destination,
+        file_keys=("**/*.csv",),
+        auto_delete=True,
+    )
+    assert counts.deleted == 1
+    assert not (destination / "old.csv").exists()
+    assert (destination / "notes.txt").read_text() == "outside"
+
+
+def test_empty_staging_auto_deletes_all_managed_files(tmp_path: Path) -> None:
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    (destination / "a.csv").write_text("gone", encoding="utf-8")
+    (destination / "keep.json").write_text("keep", encoding="utf-8")
+    staging = _stage(tmp_path / "staging", {})
+    upsert_path, deletes = _validate(
+        staging, file_keys=("**/*.csv",), auto_delete=True
+    )
+    counts = apply_folder_result(
+        upsert_path,
+        deletes,
+        destination,
+        file_keys=("**/*.csv",),
+        auto_delete=True,
+    )
+    assert (counts.read, counts.deleted) == (0, 1)
+    assert (destination / "keep.json").is_file()

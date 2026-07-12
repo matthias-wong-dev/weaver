@@ -7,7 +7,7 @@ enter this policy.
 
 Behaviour summary:
 
-* No primary key -> append-only.
+* No primary key -> full replacement.
 * Blank primary key -> reject row.
 * Duplicate incoming primary key -> reject the duplicated rows.
 * Missing declared schema column -> fail load.
@@ -246,7 +246,9 @@ def _validate_primary_key(rows, primary_key):
 
 def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete, explicit_keys):
     no_explicit = (0, 0, 0)
-    if not primary_key or mode == APPEND:
+    if not primary_key:
+        return list(accepted), len(accepted), 0, len(existing), no_explicit
+    if mode == APPEND:
         final = list(existing) + list(accepted)
         return final, len(accepted), 0, 0, no_explicit
 

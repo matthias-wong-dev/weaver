@@ -26,14 +26,21 @@ def _reasons(outcome):
     return sorted(row["_reject_reason"] for row in outcome.rejected)
 
 
-def test_no_primary_key_is_append_only() -> None:
+def test_no_primary_key_replaces_existing_rows() -> None:
     existing = _rows(("r1", "A", 10))
     incoming = _rows(("r1", "A", 99), ("r2", "A", 20))
     outcome = run_table_load(existing, incoming, primary_key=(), schema=SCHEMA)
-    # Append keeps everything, including the duplicate business key.
-    assert len(outcome.final_rows) == 3
+    assert outcome.final_rows == incoming
     assert outcome.inserted == 2
-    assert outcome.deleted == 0
+    assert outcome.updated == 0
+    assert outcome.deleted == 1
+
+
+def test_empty_no_primary_key_load_empties_table() -> None:
+    existing = _rows(("r1", "A", 10), ("r2", "A", 20))
+    outcome = run_table_load(existing, [], primary_key=(), schema=SCHEMA)
+    assert outcome.final_rows == []
+    assert (outcome.inserted, outcome.updated, outcome.deleted) == (0, 0, 2)
 
 
 def test_primary_key_keep_missing_upsert() -> None:
@@ -294,7 +301,7 @@ def test_auto_delete_with_empty_explicit_still_auto_deletes() -> None:
     assert _by_id(outcome) == {"r2": 22}
 
 
-def test_no_pk_no_auto_empty_explicit_is_append() -> None:
+def test_no_pk_no_auto_empty_explicit_is_replacement() -> None:
     outcome = run_table_load(
         _rows(("r1", "A", 10)),
         _rows(("r2", "A", 20)),
@@ -302,8 +309,8 @@ def test_no_pk_no_auto_empty_explicit_is_append() -> None:
         schema=SCHEMA,
         explicit_delete_keys=(),
     )
-    assert outcome.deleted == 0
-    assert len(outcome.final_rows) == 2
+    assert outcome.deleted == 1
+    assert [row["record_id"] for row in outcome.final_rows] == ["r2"]
 
 
 def test_three_run_behaviour_matches_fixture_expectations() -> None:

@@ -42,12 +42,63 @@ def test_parses_folder_metadata_without_primary_key() -> None:
             Folder ID: Raw.Drop
             Description: Raw file drop.
             Lineage: Writes raw CSV files into the landing folder.
+            File key: "**/*.csv"
+            Auto delete: false
             """
         )
     )
     assert meta.kind == "Folder"
     assert meta.primary_key == ()
+    assert meta.file_keys == ("**/*.csv",)
+    assert meta.auto_delete is False
     assert meta.effective_load_mode == APPEND
+
+
+def test_folder_requires_file_key_and_explicit_auto_delete() -> None:
+    with pytest.raises(MetadataError, match="declare File key"):
+        parse_object_metadata(
+            "Folder ID: Raw.Drop\nDescription: x\nLineage: y\nAuto delete: false\n"
+        )
+    with pytest.raises(MetadataError, match="explicitly declare Auto delete"):
+        parse_object_metadata(
+            'Folder ID: Raw.Drop\nDescription: x\nLineage: y\nFile key: "**/*"\n'
+        )
+
+
+def test_folder_parses_multiple_file_keys_and_allows_auto_delete_without_pk() -> None:
+    meta = parse_object_metadata(
+        textwrap.dedent(
+            '''
+            Folder ID: Raw.Drop
+            Description: x
+            Lineage: y
+            File key:
+              - "**/*.html"
+              - "**/*.pdf"
+            Auto delete: true
+            '''
+        )
+    )
+    assert meta.file_keys == ("**/*.html", "**/*.pdf")
+    assert meta.auto_delete is True
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    ["File key: []", "File key: ''", "File key: 42", "File key:\n  - '*.csv'\n  - 2"],
+)
+def test_folder_rejects_invalid_file_keys(declaration: str) -> None:
+    with pytest.raises(MetadataError, match="File key"):
+        parse_object_metadata(
+            f"Folder ID: Raw.Drop\nDescription: x\nLineage: y\n{declaration}\nAuto delete: false\n"
+        )
+
+
+def test_table_cannot_declare_file_key() -> None:
+    with pytest.raises(MetadataError, match="only for Folder"):
+        parse_object_metadata(
+            'Table ID: A.B\nDescription: x\nLineage: y\nFile key: "**/*"\n'
+        )
 
 
 def test_view_kind() -> None:

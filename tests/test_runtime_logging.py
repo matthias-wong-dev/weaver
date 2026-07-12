@@ -27,6 +27,8 @@ FIRST = '''"""
 Folder ID: Raw.First
 Description: First folder.
 Lineage: Stages the first drop file.
+File key: "**/*.csv"
+Auto delete: false
 """
 from weaver_runtime.dbrep.objects import Folder
 
@@ -42,6 +44,8 @@ SECOND = '''"""
 Folder ID: Raw.Second
 Description: Second folder.
 Lineage: Stages the second drop file after the first.
+File key: "**/*.csv"
+Auto delete: false
 """
 from weaver_runtime.dbrep.objects import Folder
 
@@ -60,6 +64,8 @@ SECOND_FAILS = '''"""
 Folder ID: Raw.Second
 Description: Second folder.
 Lineage: Fails after the first folder has succeeded.
+File key: "**/*.csv"
+Auto delete: false
 """
 from weaver_runtime.dbrep.objects import Folder
 

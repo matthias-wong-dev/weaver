@@ -70,7 +70,13 @@ def write_python_folder(
     deps: tuple[str, ...] = (),
 ) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
-    meta = [f"Folder ID: {schema}.{obj}", f"Description: {obj} folder.", f"Lineage: Writes {obj}."]
+    meta = [
+        f"Folder ID: {schema}.{obj}",
+        f"Description: {obj} folder.",
+        f"Lineage: Writes {obj}.",
+        'File key: "**/*"',
+        "Auto delete: false",
+    ]
     dep_lines = "\n".join(f'            _{i} = self.repo["{ref}"]' for i, ref in enumerate(deps))
     if not dep_lines:
         dep_lines = "            pass"

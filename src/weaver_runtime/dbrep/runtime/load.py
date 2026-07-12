@@ -238,7 +238,6 @@ def _execute_folder_step(
     """Run ``Folder.read()``, validate its result, and reconcile it into place."""
 
     destination = lakehouse_root / materialisation
-    destination.mkdir(parents=True, exist_ok=True)
     context = LoadContext(
         runtime_root=runtime_root,
         lakehouse_root=lakehouse_root,
@@ -256,9 +255,19 @@ def _execute_folder_step(
     try:
         result = _instantiate(source_object, context).read()
         upsert_path, delete_names = validate_folder_result(
-            result, issued=context.issued_staging(), destination=destination
+            result,
+            issued=context.issued_staging(),
+            destination=destination,
+            file_keys=source_object.metadata.file_keys,
+            auto_delete=source_object.metadata.auto_delete,
         )
-        counts = apply_folder_result(upsert_path, delete_names, destination)
+        counts = apply_folder_result(
+            upsert_path,
+            delete_names,
+            destination,
+            file_keys=source_object.metadata.file_keys,
+            auto_delete=source_object.metadata.auto_delete,
+        )
     finally:
         context.cleanup_staging()
 

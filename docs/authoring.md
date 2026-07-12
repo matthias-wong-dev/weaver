@@ -79,20 +79,38 @@ with self.staging_folder() as staging_folder:
 return staging_folder, ()
 ```
 
-Weaver reconciles the staged files against the target and counts file CRUD
-(`created`/`updated`/`read`-only by size then content; `deleted` for delete names
-that existed). It scans only the staging folder and the exact target paths for
-staged files and explicit deletes — never the whole target tree.
+Every Folder metadata block must explicitly declare its managed file population
+and deletion mode:
+
+```yaml
+File key:
+  - "**/*.pdf"
+  - "**/*.json"
+Auto delete: false
+```
+
+A single glob string is also valid. File keys match relative POSIX paths, and
+each matching path is one managed file identity. Weaver fails the load before
+target mutation if any staged leaf file does not match at least one File key.
+
+Weaver reconciles managed staged files against the target and counts file CRUD
+(`created`/`updated`/`read`-only by size then content; `deleted` for files that
+existed). With `Auto delete: false`, missing managed target files are retained
+and explicit deletes are allowed only when they match a File key. With
+`Auto delete: true`, staging is the complete managed population: Weaver deletes
+matching target files absent from staging and rejects explicit deletes.
+Non-matching target files are never counted, changed, or deleted.
 
 ### Folder rules
 
-- **Staged files are retained output.** Temporary download pages or intermediate
+- **Staged files must match a File key.** Temporary download pages or intermediate
   artefacts should stay **outside** staging unless meant to persist — otherwise
-  they are counted and retained. Nested files count individually; directories are
+  validation fails. Nested matching files count individually; directories are
   never CRUD units.
-- **Deletion is explicit and normally empty.** Delete entries are exact relative
-  file names — never absolute, `..`-traversing, a glob, or a directory. A path
-  cannot be both staged and deleted.
+- **Deletion has one mode.** With `Auto delete: false`, delete entries are exact
+  relative file names — never absolute, `..`-traversing, a glob, or a directory.
+  With `Auto delete: true`, explicit deletes must be empty. A path cannot be both
+  staged and explicitly deleted.
 - **Reserved Weaver files** such as `_weaver.json` cannot be staged, replaced, or
   deleted.
 - **Direct writes to the target are unsupported.** Do not write to
@@ -107,6 +125,9 @@ reconciliation.
 1. a **Spark DataFrame** of rows to insert or update;
 2. a sequence of **primary-key tuples** identifying rows to delete, in declared
    primary-key column order;
+
+A Delta table without a primary key is a full replacement: its accepted incoming
+rows become the complete table, and an empty incoming DataFrame empties it.
 
 ```python
 # single-column primary key

@@ -6,15 +6,16 @@ everything under the staging folder is upserted, the explicit relative paths are
 deleted. Weaver owns the destination — it validates the result, reconciles the staged files against the
 destination, counts file-level CRUD, and cleans the staging folder.
 
-Reconciliation scans only the staged folder and the exact destination paths that
-correspond to staged files or explicit deletes; it never inventories the whole
-destination tree, so historical file collections are not rescanned and API
-scratch pages are not counted unless the object deliberately stages them.
+Incremental reconciliation scans the staged folder and exact explicit-delete
+paths. Auto-delete reconciliation inventories only destination leaf files that
+match the Folder's declared File keys; non-matching files remain outside the
+managed population.
 """
 
 from __future__ import annotations
 
 import filecmp
+import fnmatch
 import os
 import shutil
 import uuid
@@ -68,15 +69,18 @@ def validate_folder_result(
     result,
     *,
     issued: Iterable[StagingFolder],
+    file_keys: tuple[str, ...],
+    auto_delete: bool,
     destination: Path | None = None,
 ) -> tuple[Path, tuple[str, ...]]:
     """Validate a ``Folder.read()`` result before any destination mutation.
 
     Returns ``(upsert_path, delete)`` normalised for reconciliation.
     Enforces that the first item is the StagingFolder Weaver issued to this
-    object (unconsumed, still on disk), that every delete entry is an exact
-    relative file path (never absolute, traversing, a glob, a directory, or a
-    reserved Weaver file), and that nothing is both staged and deleted. Raises
+    object (unconsumed, still on disk), that staged and deleted files match a
+    declared File key, that every delete entry is an exact relative file path
+    (never absolute, traversing, a glob, a directory, or a reserved Weaver
+    file), and that nothing is both staged and deleted. Raises
     :class:`LoadError` on the first violation and marks the folder consumed.
     """
 
@@ -101,18 +105,39 @@ def validate_folder_result(
         if Path(relative).name in RESERVED_NAMES:
             raise LoadError(f"reserved Weaver file cannot be staged: {relative}")
 
-    deletes = _validate_delete_paths(delete_names, staged, destination)
+    managed = set(managed_relative_files(staging_folder.path, file_keys))
+    if managed != staged:
+        unmatched = sorted(staged - managed)
+        raise LoadError(f"staged files do not match File key: {unmatched}")
+
+    deletes = _validate_delete_paths(
+        delete_names,
+        staged,
+        destination,
+        file_keys=file_keys,
+        auto_delete=auto_delete,
+    )
     staging_folder._consumed = True
     return staging_folder.path, deletes
 
 
-def _validate_delete_paths(delete, staged: set[str], destination) -> tuple[str, ...]:
+def _validate_delete_paths(
+    delete,
+    staged: set[str],
+    destination,
+    *,
+    file_keys: tuple[str, ...],
+    auto_delete: bool,
+) -> tuple[str, ...]:
     if isinstance(delete, (str, bytes)):
         raise LoadError("Folder deletes must be a sequence of relative file names")
     try:
         entries = list(delete)
     except TypeError as exc:
         raise LoadError("Folder deletes must be a sequence of relative file names") from exc
+
+    if auto_delete and entries:
+        raise LoadError("Folder with Auto delete enabled cannot return explicit deletes")
 
     normalised: list[str] = []
     for raw in entries:
@@ -132,6 +157,8 @@ def _validate_delete_paths(delete, staged: set[str], destination) -> tuple[str, 
         if path.name == "":
             raise LoadError(f"Folder delete path must name a file: {raw!r}")
         relative = path.as_posix()
+        if not _matches_file_key(relative, file_keys):
+            raise LoadError(f"Folder delete path does not match File key: {relative}")
         if relative in staged:
             raise LoadError(f"path cannot be both staged and deleted: {relative}")
         if destination is not None and (Path(destination) / path).is_dir():
@@ -143,19 +170,26 @@ def _validate_delete_paths(delete, staged: set[str], destination) -> tuple[str, 
 # --- Reconciliation --------------------------------------------------------
 
 
-def apply_folder_result(upsert_path: Path, delete, destination: Path) -> CrudCounts:
+def apply_folder_result(
+    upsert_path: Path,
+    delete,
+    destination: Path,
+    *,
+    file_keys: tuple[str, ...],
+    auto_delete: bool,
+) -> CrudCounts:
     """Reconcile validated staged files into ``destination`` and count file CRUD.
 
-    Applies staged creates and updates, then explicit deletes, then removes the
-    staging folder. Only staged leaf files and explicit delete paths are touched;
-    the destination tree is never fully rescanned. An identical staged file is
-    counted as ``read`` but not created/updated.
+    Applies staged creates and updates, then explicit or automatic deletes, then
+    removes the staging folder. Automatic deletion inventories only managed
+    destination files. An identical staged file is counted as ``read`` but not
+    created/updated.
     """
 
     destination = Path(destination)
     upsert_path = Path(upsert_path)
     try:
-        staged = staged_relative_files(upsert_path)
+        staged = managed_relative_files(upsert_path, file_keys)
 
         proposed: list[tuple[str, str]] = []
         for relative in staged:
@@ -177,8 +211,13 @@ def apply_folder_result(upsert_path: Path, delete, destination: Path) -> CrudCou
                 _safe_replace(upsert_path / relative, destination / relative)
                 updated += 1
 
+        delete_paths = set(delete)
+        if auto_delete:
+            existing_managed = set(managed_relative_files(destination, file_keys))
+            delete_paths.update(existing_managed - set(staged))
+
         deleted = 0
-        for relative in delete:
+        for relative in sorted(delete_paths):
             if Path(relative).name in RESERVED_NAMES:
                 continue
             target = destination / relative
@@ -210,6 +249,37 @@ def staged_relative_files(upsert_path: Path) -> list[str]:
             full = Path(dirpath) / name
             files.append(full.relative_to(upsert_path).as_posix())
     return sorted(files)
+
+
+def managed_relative_files(root: Path, patterns: tuple[str, ...]) -> list[str]:
+    """Unique managed leaf-file paths beneath ``root``, sorted as POSIX paths."""
+
+    root = Path(root)
+    matches: set[str] = set()
+    for pattern in patterns:
+        for path in root.glob(pattern):
+            if path.is_file() and path.name not in RESERVED_NAMES:
+                matches.add(path.relative_to(root).as_posix())
+    return sorted(matches)
+
+
+def _matches_file_key(relative: str, patterns: tuple[str, ...]) -> bool:
+    path_parts = tuple(Path(relative).as_posix().split("/"))
+    return any(_match_parts(path_parts, tuple(pattern.split("/"))) for pattern in patterns)
+
+
+def _match_parts(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    if not pattern_parts:
+        return not path_parts
+    head, *tail = pattern_parts
+    remaining = tuple(tail)
+    if head == "**":
+        return _match_parts(path_parts, remaining) or (
+            bool(path_parts) and _match_parts(path_parts[1:], pattern_parts)
+        )
+    return bool(path_parts) and fnmatch.fnmatchcase(path_parts[0], head) and _match_parts(
+        path_parts[1:], remaining
+    )
 
 
 def _files_identical(source: Path, target: Path) -> bool:

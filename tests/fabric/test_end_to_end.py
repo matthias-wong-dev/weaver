@@ -25,6 +25,8 @@ def _write_fixture(root: Path) -> None:
             Folder ID: Raw.Drop
             Description: Raw record drop folder.
             Lineage: Writes a fixed seed CSV into the landing folder.
+            File key: "**/*.csv"
+            Auto delete: false
             """
             from weaver_runtime.dbrep.objects import Folder
 

@@ -59,6 +59,7 @@ class ObjectMetadata:
     description: str
     lineage: str
     primary_key: tuple[str, ...]
+    file_keys: tuple[str, ...]
     auto_delete: bool
     static: bool
     load_mode: str | None
@@ -144,12 +145,19 @@ def parse_object_metadata(text: str) -> ObjectMetadata:
     description = _required_text(loaded, "Description")
     lineage = _required_text(loaded, "Lineage")
     primary_key = _parse_primary_key(loaded.get("Primary key"))
+    file_keys = _parse_file_keys(
+        loaded.get("File key"), kind=kind, declared="File key" in loaded
+    )
+    if kind == FOLDER and (
+        "Auto delete" not in loaded or loaded.get("Auto delete") is None
+    ):
+        raise MetadataError("Folder metadata must explicitly declare Auto delete")
     auto_delete = _parse_bool(loaded.get("Auto delete"), "Auto delete")
     static = _parse_bool(loaded.get("Static"), "Static")
     load_mode = _parse_load_mode(loaded.get("Load mode"))
     schema = _parse_schema(loaded.get("Schema"))
 
-    if auto_delete and not primary_key:
+    if kind == TABLE and auto_delete and not primary_key:
         raise MetadataError(
             "Auto delete requires a Primary key (no-PK auto-delete is invalid)"
         )
@@ -160,6 +168,7 @@ def parse_object_metadata(text: str) -> ObjectMetadata:
         description=description,
         lineage=lineage,
         primary_key=primary_key,
+        file_keys=file_keys,
         auto_delete=auto_delete,
         static=static,
         load_mode=load_mode,
@@ -209,6 +218,32 @@ def _parse_primary_key(value: Any) -> tuple[str, ...]:
     if len(set(columns)) != len(columns):
         raise MetadataError("Primary key must not repeat columns")
     return columns
+
+
+def _parse_file_keys(value: Any, *, kind: str, declared: bool) -> tuple[str, ...]:
+    if kind != FOLDER:
+        if declared:
+            raise MetadataError("File key is supported only for Folder objects")
+        return ()
+    if value is None:
+        raise MetadataError("Folder metadata must declare File key")
+
+    values = [value] if isinstance(value, str) else value
+    if not isinstance(values, list) or not values:
+        raise MetadataError("File key must be a non-empty string or list of strings")
+
+    patterns: list[str] = []
+    for pattern in values:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise MetadataError("File key patterns must be non-empty strings")
+        normalised = pattern.strip().replace("\\", "/")
+        path_parts = normalised.split("/")
+        if normalised.startswith("/") or ".." in path_parts:
+            raise MetadataError(
+                "File key patterns must be relative and must not traverse with '..'"
+            )
+        patterns.append(normalised)
+    return tuple(patterns)
 
 
 def _parse_bool(value: Any, key: str) -> bool:
