@@ -38,6 +38,16 @@ class HostGroup:
 
 
 @dataclass(frozen=True)
+class RuntimeComponent:
+    """One independently reconciled portion of an installed runtime."""
+
+    kind: str
+    name: str
+    local_root: Path
+    remote_root: str
+
+
+@dataclass(frozen=True)
 class LakehouseHostArtifact:
     """A generated, not-yet-applied build artifact for one Lakehouse host."""
 
@@ -49,6 +59,7 @@ class LakehouseHostArtifact:
     plan_path: Path
     object_ids: tuple[str, ...]
     program: str
+    runtime_components: tuple[RuntimeComponent, ...]
 
 
 def group_lakehouse_objects_by_host(plan, *, fabric: bool | None = None) -> list[HostGroup]:
@@ -106,42 +117,88 @@ def generate_lakehouse_artifacts(plan, out_dir) -> list[LakehouseHostArtifact]:
 
     artifacts: list[LakehouseHostArtifact] = []
     for group in groups:
-        host_root = out_dir / group.server
-        staged_pairs = tuple(
-            BuildPair(
-                pair.source,
-                replace(
-                    pair.target,
-                    host=str(host_root),
-                    server_type="Local Lakehouse",
-                    fabric_workspace=None,
-                    fabric_lakehouse=None,
-                ),
-            )
-            for pair in group.pairs
-        )
-        install_build(replace(plan, pairs=staged_pairs))
-
-        program = programs[group.server]
-        build_program_path = host_root / BUILD_PROGRAM_NAME
-        build_program_path.write_text(program, encoding="utf-8")
-
-        plan_path = host_root / BUILD_PLAN_NAME
-        write_json(plan_path, build_plan_document(group, program_name=BUILD_PROGRAM_NAME))
-
         artifacts.append(
-            LakehouseHostArtifact(
-                server=group.server,
-                targets=group.target_aliases,
-                root=host_root,
-                files_root=host_root / "Files",
-                build_program_path=build_program_path,
-                plan_path=plan_path,
-                object_ids=tuple(obj.id for obj in group.objects),
-                program=program,
+            generate_lakehouse_host_artifact(
+                plan,
+                group,
+                out_dir / group.server,
+                program=programs[group.server],
             )
         )
     return artifacts
+
+
+def generate_lakehouse_host_artifact(
+    plan,
+    group: HostGroup,
+    host_root: Path,
+    *,
+    program: str | None = None,
+    initial_runtime_metadata: dict[str, dict] | None = None,
+) -> LakehouseHostArtifact:
+    """Stage exactly one already-grouped Lakehouse build.
+
+    Fabric resolves physical host identity before calling this helper, so aliases
+    pointing at the same Lakehouse are deliberately installed into one staging
+    root and produce one program and one set of runtime components.
+    """
+
+    host_root = Path(host_root)
+    runtime_root = host_root / "Files" / "_weaver" / "runtime"
+    for name, document in (initial_runtime_metadata or {}).items():
+        write_json(runtime_root / name, document)
+
+    staged_pairs = tuple(
+        BuildPair(
+            pair.source,
+            replace(
+                pair.target,
+                server_alias=group.server,
+                host=str(host_root),
+                server_type="Local Lakehouse",
+                fabric_workspace=None,
+                fabric_lakehouse=None,
+            ),
+        )
+        for pair in group.pairs
+    )
+    install_build(replace(plan, pairs=staged_pairs))
+
+    rendered = program if program is not None else render_host_program(group)
+    build_program_path = host_root / BUILD_PROGRAM_NAME
+    build_program_path.write_text(rendered, encoding="utf-8")
+    plan_path = host_root / BUILD_PLAN_NAME
+    write_json(plan_path, build_plan_document(group, program_name=BUILD_PROGRAM_NAME))
+
+    databases = sorted({pair.source.database for pair in group.pairs})
+    components = [
+        RuntimeComponent(
+            kind="builtin",
+            name="weaver",
+            local_root=runtime_root / "_orchestrator",
+            remote_root="_weaver/runtime/_orchestrator",
+        )
+    ]
+    components.extend(
+        RuntimeComponent(
+            kind="database",
+            name=database,
+            local_root=runtime_root / "objects" / database,
+            remote_root=f"_weaver/runtime/objects/{database}",
+        )
+        for database in databases
+    )
+    return LakehouseHostArtifact(
+        server=group.server,
+        targets=group.target_aliases,
+        root=host_root,
+        files_root=host_root / "Files",
+        build_program_path=build_program_path,
+        plan_path=plan_path,
+        object_ids=tuple(obj.id for obj in group.objects),
+        program=rendered,
+        runtime_components=tuple(components),
+    )
 
 
 def build_plan_document(group: HostGroup, *, program_name: str = BUILD_PROGRAM_NAME) -> dict:

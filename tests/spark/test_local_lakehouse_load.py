@@ -20,6 +20,7 @@ FIXTURE_SES = Path(__file__).resolve().parents[1] / "fixtures" / "generic_ses" /
 DELTA_TABLES = {
     "T1.Stage.Record": "T1/Stage/Record",
     "T1.Mart.RecordAudit": "T1/Mart/RecordAudit",
+    "T1.Mart.RecordSnapshot": "T1/Mart/RecordSnapshot",
     "T1.Mart.RecordCurrentAuto": "T1/Mart/RecordCurrentAuto",
     "T1.Mart.RecordCurrentKeep": "T1/Mart/RecordCurrentKeep",
     "T2.Mart.RecordAggregate": "T2/Mart/RecordAggregate",
@@ -30,6 +31,7 @@ DELTA_TABLES = {
 OLD_DOTTED_RELATIVE = [
     "T1/Stage.Record",
     "T1/Mart.RecordAudit",
+    "T1/Mart.RecordSnapshot",
     "T1/Mart.RecordCurrentAuto",
     "T1/Mart.RecordCurrentKeep",
     "T2/Mart.RecordAggregate",

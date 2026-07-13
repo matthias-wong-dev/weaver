@@ -7,6 +7,7 @@ import pytest
 from weaver_runtime.dbrep.errors import MetadataError
 from weaver_runtime.dbrep.ses.metadata import (
     APPEND,
+    REPLACE,
     UPSERT,
     extract_python_metadata_text,
     extract_sql_metadata_and_body,
@@ -54,15 +55,15 @@ def test_parses_folder_metadata_without_primary_key() -> None:
     assert meta.effective_load_mode == APPEND
 
 
-def test_folder_requires_file_key_and_explicit_auto_delete() -> None:
+def test_folder_requires_file_key_and_defaults_auto_delete_false() -> None:
     with pytest.raises(MetadataError, match="declare File key"):
         parse_object_metadata(
             "Folder ID: Raw.Drop\nDescription: x\nLineage: y\nAuto delete: false\n"
         )
-    with pytest.raises(MetadataError, match="explicitly declare Auto delete"):
-        parse_object_metadata(
-            'Folder ID: Raw.Drop\nDescription: x\nLineage: y\nFile key: "**/*"\n'
-        )
+    meta = parse_object_metadata(
+        'Folder ID: Raw.Drop\nDescription: x\nLineage: y\nFile key: "**/*"\n'
+    )
+    assert meta.auto_delete is False
 
 
 def test_folder_parses_multiple_file_keys_and_allows_auto_delete_without_pk() -> None:
@@ -172,6 +173,31 @@ def test_auto_delete_true_with_pk_ok() -> None:
         )
     )
     assert meta.auto_delete is True
+
+
+def test_auto_delete_defaults_by_object_kind_and_primary_key() -> None:
+    keyed_table = parse_object_metadata(
+        "Table ID: A.Keyed\nDescription: x\nLineage: y\nPrimary key: id\n"
+    )
+    unkeyed_table = parse_object_metadata(
+        "Table ID: A.Snapshot\nDescription: x\nLineage: y\n"
+    )
+    folder = parse_object_metadata(
+        'Folder ID: A.Files\nDescription: x\nLineage: y\nFile key: "**/*"\n'
+    )
+
+    assert keyed_table.auto_delete is True
+    assert unkeyed_table.auto_delete is False
+    assert folder.auto_delete is False
+    assert keyed_table.effective_load_mode == UPSERT
+    assert unkeyed_table.effective_load_mode == REPLACE
+
+
+def test_sql_table_uses_the_same_keyed_auto_delete_default() -> None:
+    metadata_text, _body = extract_sql_metadata_and_body(
+        "/*\nTable ID: A.Keyed\nDescription: x\nLineage: y\nPrimary key: id\n*/\nselect 1"
+    )
+    assert parse_object_metadata(metadata_text).auto_delete is True
 
 
 def test_auto_delete_must_be_boolean() -> None:

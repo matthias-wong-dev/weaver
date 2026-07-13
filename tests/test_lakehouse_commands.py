@@ -100,7 +100,7 @@ def _mock_fabric(monkeypatch) -> dict:
         }
 
     def fake_sync(files_root, resolved, **kwargs):
-        calls["sync"].append(Path(files_root))
+        calls["sync"].append((Path(files_root), kwargs.get("runtime_components", ())))
         return 7
 
     def fake_upload(resolved, files_path, content):
@@ -111,6 +111,7 @@ def _mock_fabric(monkeypatch) -> dict:
         return ({"root": "abfss://W@onelake/L", "created": ["T1.Stage.Record"], "existing": []}, None)
 
     monkeypatch.setattr(fabric_lakehouse.onelake, "resolve_lakehouse", fake_resolve)
+    monkeypatch.setattr(fabric_lakehouse.onelake, "read_runtime_metadata", lambda resolved: {})
     monkeypatch.setattr(fabric_lakehouse.onelake, "sync_runtime_folder", fake_sync)
     monkeypatch.setattr(fabric_lakehouse.onelake, "upload_file", fake_upload)
     monkeypatch.setattr(fabric_lakehouse, "_run_program", fake_run)
@@ -139,12 +140,106 @@ def test_fabric_build_submits_one_program_and_writes_completion(tmp_path: Path, 
     # The Files/ tree is synced exactly once; the completion record is published
     # after success as a single focused file upload, not a second full sync.
     assert len(calls["sync"]) == 1
+    _files_root, components = calls["sync"][0]
+    assert [(item.kind, item.name, item.remote_root) for item in components] == [
+        ("builtin", "weaver", "_weaver/runtime/_orchestrator"),
+        ("database", "T0", "_weaver/runtime/objects/T0"),
+        ("database", "T1", "_weaver/runtime/objects/T1"),
+    ]
     assert len(calls["uploads"]) == 1
     files_path, content = calls["uploads"][0]
     assert files_path == "_weaver/runtime/build_complete.json"
     record = json.loads(content)
     assert record["result"]["created"] == ["T1.Stage.Record"]
     assert record["objects"] == ["T0.Raw.Drop", "T1.Stage.Record"]
+
+
+def test_fabric_aliases_resolving_to_one_physical_lakehouse_are_grouped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ses_root = tmp_path / "SES"
+    servers = {
+        "SES_Repo": {"server": str(ses_root)},
+        "Fabric_A": {"type": "Fabric Lakehouse", "server": "Workspace/AliasA"},
+        "Fabric_B": {"type": "Fabric Lakehouse", "server": "Workspace/AliasB"},
+    }
+    databases = {
+        "T0_SES": {"type": "SES", "server": "SES_Repo", "database": "T0"},
+        "T1_SES": {"type": "SES", "server": "SES_Repo", "database": "T1"},
+        "T0_FILES": {"type": "Files", "server": "Fabric_A", "database": "T0"},
+        "T1_DELTA": {"type": "Delta", "server": "Fabric_B", "database": "T1"},
+    }
+    weaver_path = write_config_files(tmp_path, servers, databases)
+    _sources(ses_root)
+    calls = _mock_fabric(monkeypatch)
+
+    payload = run_build(weaver_path, "T0_SES,T1_SES", "T0_FILES,T1_DELTA")
+
+    assert len(payload["fabric"]) == 1
+    assert payload["fabric"][0]["targets"] == ["T0_FILES", "T1_DELTA"]
+    assert len(calls["sync"]) == 1
+    assert len(calls["programs"]) == 1
+
+
+def test_fabric_partial_build_preserves_unselected_metadata_and_scopes_prune(
+    tmp_path: Path, monkeypatch
+) -> None:
+    weaver_path = _fabric_config(tmp_path)
+    calls = _mock_fabric(monkeypatch)
+    t1 = {
+        "id": "T1.Stage.Record",
+        "source_database": "T1_SES",
+        "target_database": "T1_DELTA",
+        "installed_source": "objects/T1/Stage__Record.py",
+    }
+    stale_t0 = {
+        "id": "T0.Raw.Old",
+        "source_database": "T0_SES",
+        "target_database": "T0_FILES",
+        "installed_source": "objects/T0/Raw__Old.py",
+    }
+    existing = {
+        "manifest.json": {
+            "version": 1,
+            "installed_from": ["T0_SES", "T1_SES"],
+            "installed_to": ["T0_FILES", "T1_DELTA"],
+            "external_dependencies": [],
+        },
+        "catalogue.json": {"version": 1, "objects": [stale_t0, t1]},
+        "load_dependency.json": {
+            "version": 1,
+            "objects": {"T0.Raw.Old": [], "T1.Stage.Record": []},
+        },
+        "table_dictionary.json": {
+            "version": 1,
+            "tables": [{"id": "T0.Raw.Old"}, {"id": "T1.Stage.Record"}],
+        },
+        "column_dictionary.json": {"version": 1, "columns": []},
+        "index_dictionary.json": {"version": 1, "indexes": []},
+        "foreign_key_dictionary.json": {"version": 1, "foreign_keys": []},
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        fabric_lakehouse.onelake, "read_runtime_metadata", lambda resolved: existing
+    )
+
+    def capture_sync(files_root, resolved, **kwargs):
+        runtime = Path(files_root) / "_weaver" / "runtime"
+        captured["catalogue"] = json.loads((runtime / "catalogue.json").read_text())
+        captured["manifest"] = json.loads((runtime / "manifest.json").read_text())
+        return 7
+
+    monkeypatch.setattr(fabric_lakehouse.onelake, "sync_runtime_folder", capture_sync)
+
+    run_build(weaver_path, "T0_SES", "T0_FILES", prune=True)
+
+    ids = {entry["id"] for entry in captured["catalogue"]["objects"]}
+    assert ids == {"T0.Raw.Drop", "T1.Stage.Record"}
+    assert captured["manifest"]["installed_from"] == ["T0_SES", "T1_SES"]
+    assert captured["manifest"]["installed_to"] == ["T0_FILES", "T1_DELTA"]
+    assert captured["manifest"]["object_count"] == 2
+    assert len(calls["programs"]) == 1
 
 
 def test_local_table_load_without_spark_fails_clearly(tmp_path: Path, monkeypatch) -> None:

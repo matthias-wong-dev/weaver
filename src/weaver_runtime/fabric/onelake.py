@@ -214,8 +214,8 @@ def read_file(target: LakehouseTarget, files_path: str) -> bytes:
     return content
 
 
-def list_files(target: LakehouseTarget, folder: str) -> list[dict[str, Any]]:
-    """Return files listed recursively under one Lakehouse Files folder."""
+def list_paths(target: LakehouseTarget, folder: str) -> list[dict[str, Any]]:
+    """Return file and directory metadata recursively beneath a Files folder."""
 
     directory = "/".join(
         part
@@ -239,12 +239,23 @@ def list_files(target: LakehouseTarget, folder: str) -> list[dict[str, Any]]:
             expected_statuses={200},
         )
         payload = payload or {}
-        paths.extend(
-            path for path in payload.get("paths", []) if not path.get("isDirectory")
-        )
+        paths.extend(payload.get("paths", []))
         continuation = headers.get("x-ms-continuation")
         if not continuation:
             return paths
+
+
+def list_files(target: LakehouseTarget, folder: str) -> list[dict[str, Any]]:
+    """Return files listed recursively under one Lakehouse Files folder."""
+
+    return [path for path in list_paths(target, folder) if not path_is_directory(path)]
+
+
+def path_is_directory(path: dict[str, Any]) -> bool:
+    """Interpret the DFS API's boolean-or-string ``isDirectory`` field."""
+
+    value = path.get("isDirectory", False)
+    return value is True or (isinstance(value, str) and value.lower() == "true")
 
 
 def delete_file(target: LakehouseTarget, files_path: str) -> None:

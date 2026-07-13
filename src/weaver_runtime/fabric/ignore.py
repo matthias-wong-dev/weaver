@@ -24,6 +24,7 @@ DEFAULT_PLATFORM_IGNORE_LINES = [
     ".DS_Store",
     "__pycache__/",
     "*.pyc",
+    "*.pyo",
     ".venv/",
     "venv/",
     ".env",

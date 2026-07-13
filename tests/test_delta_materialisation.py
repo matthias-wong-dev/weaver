@@ -22,6 +22,7 @@ FIXTURE_SES = Path(__file__).resolve().parent / "fixtures" / "generic_ses" / "SE
 _ALL_DELTA = {
     "T1.Stage.Record": "Stage/Record",
     "T1.Mart.RecordAudit": "Mart/RecordAudit",
+    "T1.Mart.RecordSnapshot": "Mart/RecordSnapshot",
     "T1.Mart.RecordCurrentAuto": "Mart/RecordCurrentAuto",
     "T1.Mart.RecordCurrentKeep": "Mart/RecordCurrentKeep",
     "T2.Mart.RecordAggregate": "Mart/RecordAggregate",

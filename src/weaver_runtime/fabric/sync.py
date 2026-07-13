@@ -276,6 +276,10 @@ def sync_folder(
         ):
             deleted.append(future.result())
 
+    removed_directories = (
+        remove_empty_directories(target, folder) if delete and diff.delete_paths else []
+    )
+
     wrote_signatures = False
     if signatures and diff.write_signatures:
         metadata_path = "/".join(part for part in [folder, SIGNATURES_NAME] if part)
@@ -302,6 +306,7 @@ def sync_folder(
         },
         "uploaded_paths": sorted(uploaded),
         "deleted_paths": sorted(deleted),
+        "deleted_directories": removed_directories,
         "ignored_sample": sorted(ignored)[:20],
         "degrees_of_parallelism": degrees_of_parallelism,
         "signatures": bool(signatures),
@@ -310,3 +315,54 @@ def sync_folder(
         "delete": delete,
         "success": True,
     }
+
+
+def remove_empty_directories(target: LakehouseTarget, folder: str) -> list[str]:
+    """Remove empty descendants of ``folder`` without deleting ``folder`` itself.
+
+    OneLake directory metadata determines emptiness; file length is deliberately
+    ignored so a legitimate zero-byte file keeps its parent directory alive.
+    """
+
+    root = onelake.normalise_files_folder(folder)
+    try:
+        paths = onelake.list_paths(target, root)
+    except FabricClientError as exc:
+        if "returned HTTP 404" in str(exc):
+            return []
+        raise
+
+    prefix = "/".join(
+        part
+        for part in [onelake.artifact_path(target.lakehouse_id), "Files", root]
+        if part
+    )
+    prefix_with_slash = f"{prefix}/"
+    directories: set[str] = set()
+    files: set[str] = set()
+    for entry in paths:
+        name = str(entry.get("name", "")).strip("/")
+        if not name.startswith(prefix_with_slash):
+            if name == prefix:
+                continue
+            raise OneLakeError(f"unexpected remote path outside target: {name}")
+        relative = onelake.validate_relative_path(name[len(prefix_with_slash) :])
+        (directories if onelake.path_is_directory(entry) else files).add(relative)
+
+    occupied: set[str] = set()
+    for file_path in files:
+        parts = file_path.split("/")[:-1]
+        occupied.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+
+    empty = sorted(
+        directories - occupied,
+        key=lambda path: (-path.count("/"), path),
+    )
+    removed: list[str] = []
+    for relative in empty:
+        # ``relative`` was validated and ``root`` was normalised above, so this
+        # delete cannot address the component root or escape its descendants.
+        path = "/".join(part for part in ["Files", root, relative] if part)
+        onelake.delete_directory(target, path)
+        removed.append(relative)
+    return removed

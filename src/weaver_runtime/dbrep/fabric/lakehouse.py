@@ -16,9 +16,9 @@ import tempfile
 
 from ..lakehouse.artifacts import (
     COMPLETION_RECORD_NAME,
+    HostGroup,
     completion_record,
-    generate_lakehouse_artifacts,
-    group_lakehouse_objects_by_host,
+    generate_lakehouse_host_artifact,
 )
 from ..lakehouse.programs import render_load_program
 from . import onelake
@@ -44,11 +44,11 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
     submitter. A completion record is written only after that program succeeds.
     """
 
-    fabric_plan = replace(plan, pairs=tuple(fabric_pairs))
     results: list[FabricBuildResult] = []
-    for group in group_lakehouse_objects_by_host(fabric_plan, fabric=True):
-        representative = group.pairs[0].target
-        environment_names = {pair.target.environment for pair in group.pairs if pair.target.environment}
+    for group, resolved in _group_by_physical_lakehouse(plan, fabric_pairs):
+        environment_names = {
+            pair.target.environment for pair in group.pairs if pair.target.environment
+        }
         if len(environment_names) > 1:
             raise ValueError(
                 "grouped Fabric Lakehouse targets require one effective Environment; got "
@@ -57,12 +57,18 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
         environment_name = next(iter(environment_names), None)
         with tempfile.TemporaryDirectory(prefix="weaver_fabric_stage_") as tmp:
             host_plan = replace(plan, pairs=group.pairs)
-            (artifact,) = generate_lakehouse_artifacts(host_plan, Path(tmp))
-
-            resolved = onelake.resolve_lakehouse(
-                representative.fabric_workspace, representative.fabric_lakehouse
+            existing_metadata = onelake.read_runtime_metadata(resolved)
+            artifact = generate_lakehouse_host_artifact(
+                host_plan,
+                group,
+                Path(tmp) / "lakehouse",
+                initial_runtime_metadata=existing_metadata,
             )
-            uploaded = onelake.sync_runtime_folder(artifact.files_root, resolved)
+            uploaded = onelake.sync_runtime_folder(
+                artifact.files_root,
+                resolved,
+                runtime_components=artifact.runtime_components,
+            )
 
             result, environment_id = _run_program(
                 resolved, artifact.program, environment_name=environment_name
@@ -83,6 +89,42 @@ def build_fabric_lakehouse(plan, fabric_pairs) -> list[FabricBuildResult]:
                 )
             )
     return results
+
+
+def _group_by_physical_lakehouse(plan, fabric_pairs) -> list[tuple[HostGroup, dict]]:
+    """Resolve first, then group aliases by immutable Fabric resource ids."""
+
+    order_index = {object_id: index for index, object_id in enumerate(plan.order)}
+    grouped: dict[tuple[str, str], tuple[dict, list]] = {}
+    for pair in fabric_pairs:
+        resolved = onelake.resolve_lakehouse(
+            pair.target.fabric_workspace, pair.target.fabric_lakehouse
+        )
+        key = (resolved["workspace_id"], resolved["lakehouse_id"])
+        if key not in grouped:
+            grouped[key] = (resolved, [])
+        grouped[key][1].append(pair)
+
+    groups: list[tuple[HostGroup, dict]] = []
+    for resolved, pairs in grouped.values():
+        aliases = {pair.target.alias for pair in pairs}
+        objects = tuple(
+            sorted(
+                (obj for obj in plan.objects if obj.target_alias in aliases),
+                key=lambda obj: order_index[obj.id],
+            )
+        )
+        groups.append(
+            (
+                HostGroup(
+                    server=pairs[0].target.server_alias,
+                    pairs=tuple(pairs),
+                    objects=objects,
+                ),
+                resolved,
+            )
+        )
+    return groups
 
 
 def load_fabric_lakehouse(

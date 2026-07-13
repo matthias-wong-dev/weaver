@@ -193,6 +193,7 @@ def _install_one_host(
         target_aliases=target_aliases,
         prune=prune,
     )
+    manifest = _merged_manifest(root, manifest, metadata_docs["catalogue"])
     _remove_pruned_sources(root, metadata_docs["catalogue"], pruned_entries)
 
     manifest_path = root / "manifest.json"
@@ -376,6 +377,32 @@ def _merged_runtime_metadata(
         },
         stale_entries if prune else [],
     )
+
+
+def _merged_manifest(root: Path, current: dict, catalogue: dict) -> dict:
+    """Summarise the complete merged runtime, including unselected databases."""
+
+    existing = _read_optional(root / "manifest.json", {})
+    objects = catalogue.get("objects", [])
+    external_by_id = {
+        item["id"]: item
+        for item in [
+            *existing.get("external_dependencies", []),
+            *current.get("external_dependencies", []),
+        ]
+        if isinstance(item, dict) and item.get("id")
+    }
+    return {
+        **current,
+        "installed_from": sorted(
+            {entry["source_database"] for entry in objects if entry.get("source_database")}
+        ),
+        "installed_to": sorted(
+            {entry["target_database"] for entry in objects if entry.get("target_database")}
+        ),
+        "object_count": len(objects),
+        "external_dependencies": [external_by_id[key] for key in sorted(external_by_id)],
+    }
 
 
 def _read_optional(path: Path, default: dict) -> dict:

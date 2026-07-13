@@ -112,8 +112,9 @@ with self.staging_folder() as staging_folder:
 return staging_folder, ()
 ```
 
-Every Folder metadata block must explicitly declare its managed file population
-and deletion mode:
+Every Folder metadata block must explicitly declare its managed file population.
+`Auto delete` defaults to `false` for folders and may be declared when a different
+mode is required:
 
 ```yaml
 File key:
@@ -159,8 +160,14 @@ reconciliation.
 2. a sequence of **primary-key tuples** identifying rows to delete, in declared
    primary-key column order;
 
-A Delta table without a primary key is a full replacement: its accepted incoming
-rows become the complete table, and an empty incoming DataFrame empties it.
+A table without a primary key is a full replacement: its accepted incoming rows
+become the complete table, and an empty incoming DataFrame empties it. Append-like
+audit/event tables therefore need a primary key that uniquely identifies each
+event and `Auto delete: false`. These rules are shared by Spark/Delta and SQL
+tables.
+
+`Auto delete` defaults to `true` for a table with a primary key and `false` for a
+table without one. An explicit declaration overrides the keyed-table default.
 
 ```python
 # single-column primary key

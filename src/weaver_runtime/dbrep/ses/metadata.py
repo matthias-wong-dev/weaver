@@ -31,6 +31,7 @@ VIEW = "View"
 OBJECT_KINDS = frozenset({FOLDER, TABLE, VIEW})
 
 APPEND = "append"
+REPLACE = "replace"
 UPSERT = "upsert"
 LOAD_MODES = frozenset({APPEND, UPSERT})
 
@@ -76,11 +77,13 @@ class ObjectMetadata:
 
     @property
     def effective_load_mode(self) -> str:
-        """Load mode after applying defaults: PK implies upsert, else append."""
+        """Load mode after applying defaults: PK implies upsert, else replace."""
 
         if self.load_mode is not None:
             return self.load_mode
-        return UPSERT if self.has_primary_key else APPEND
+        if self.kind == TABLE:
+            return UPSERT if self.has_primary_key else REPLACE
+        return APPEND
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -148,11 +151,11 @@ def parse_object_metadata(text: str) -> ObjectMetadata:
     file_keys = _parse_file_keys(
         loaded.get("File key"), kind=kind, declared="File key" in loaded
     )
-    if kind == FOLDER and (
-        "Auto delete" not in loaded or loaded.get("Auto delete") is None
-    ):
-        raise MetadataError("Folder metadata must explicitly declare Auto delete")
-    auto_delete = _parse_bool(loaded.get("Auto delete"), "Auto delete")
+    auto_delete = _parse_auto_delete(
+        loaded.get("Auto delete"),
+        kind=kind,
+        has_primary_key=bool(primary_key),
+    )
     static = _parse_bool(loaded.get("Static"), "Static")
     load_mode = _parse_load_mode(loaded.get("Load mode"))
     schema = _parse_schema(loaded.get("Schema"))
@@ -252,6 +255,14 @@ def _parse_bool(value: Any, key: str) -> bool:
     if isinstance(value, bool):
         return value
     raise MetadataError(f"{key} must be a boolean (true/false)")
+
+
+def _parse_auto_delete(value: Any, *, kind: str, has_primary_key: bool) -> bool:
+    """Apply object-aware defaults while preserving explicit declarations."""
+
+    if value is None:
+        return kind == TABLE and has_primary_key
+    return _parse_bool(value, "Auto delete")
 
 
 def _parse_load_mode(value: Any) -> str | None:

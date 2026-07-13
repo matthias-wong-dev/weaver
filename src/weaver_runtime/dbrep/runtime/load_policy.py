@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from ..errors import LoadError
-from ..ses.metadata import APPEND, UPSERT
+from ..ses.metadata import APPEND, REPLACE, UPSERT
 
 REASON_MISSING_COLUMN = "missing_schema_column"
 REASON_BLANK_PK = "blank_primary_key"
@@ -103,7 +103,7 @@ def run_table_load(
     rejected = pk_rejects
     has_rejects = bool(rejected)
 
-    mode = (load_mode or (UPSERT if primary_key else APPEND)).lower()
+    mode = (load_mode or (UPSERT if primary_key else REPLACE)).lower()
     effective_auto_delete = auto_delete and not has_rejects and mode == UPSERT and bool(primary_key)
 
     explicit_keys: tuple[tuple, ...] = ()
@@ -251,6 +251,8 @@ def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete, ex
     if mode == APPEND:
         final = list(existing) + list(accepted)
         return final, len(accepted), 0, 0, no_explicit
+    if mode == REPLACE:
+        return list(accepted), len(accepted), 0, len(existing), no_explicit
 
     existing_by_key = {_key(row, primary_key): row for row in existing}
     incoming_by_key = {_key(row, primary_key): row for row in accepted}
