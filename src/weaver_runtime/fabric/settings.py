@@ -6,7 +6,7 @@ workspace, lakehouse, repository, notebook, or endpoint names live here.
 
 Resolution order for every field is::
 
-    CLI override -> environment config -> technical fallback default
+    CLI override -> environment variable -> technical fallback default
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ def _first(*values: object) -> object | None:
 
 
 def resolve_settings(
-    config_settings: FabricSettings | None = None,
     *,
     api_base_url: str | None = None,
     onelake_base_url: str | None = None,
@@ -57,12 +56,10 @@ def resolve_settings(
     livy_api_version: str | None = None,
     default_degrees_of_parallelism: int | None = None,
 ) -> FabricSettings:
-    """Resolve connection settings: CLI override -> config -> env var -> default."""
+    """Resolve connection settings: CLI override -> environment -> default."""
 
-    base = config_settings or FabricSettings()
     dop = _first(
         default_degrees_of_parallelism,
-        base.default_degrees_of_parallelism,
         os.environ.get("FABRIC_DEGREES_OF_PARALLELISM"),
         DEFAULT_DEGREES_OF_PARALLELISM,
     )
@@ -71,7 +68,6 @@ def resolve_settings(
             _first(
                 api_base_url,
                 os.environ.get("FABRIC_API_BASE_URL"),
-                base.api_base_url,
                 DEFAULT_API_BASE_URL,
             )
         ),
@@ -79,7 +75,6 @@ def resolve_settings(
             _first(
                 onelake_base_url,
                 os.environ.get("ONELAKE_BASE_URL"),
-                base.onelake_base_url,
                 DEFAULT_ONELAKE_BASE_URL,
             )
         ),
@@ -87,7 +82,6 @@ def resolve_settings(
             _first(
                 fabric_scope,
                 os.environ.get("FABRIC_API_SCOPE"),
-                base.fabric_scope,
                 DEFAULT_FABRIC_SCOPE,
             )
         ),
@@ -95,7 +89,6 @@ def resolve_settings(
             _first(
                 storage_scope,
                 os.environ.get("ONELAKE_SCOPE"),
-                base.storage_scope,
                 DEFAULT_STORAGE_SCOPE,
             )
         ),
@@ -103,7 +96,6 @@ def resolve_settings(
             _first(
                 sql_scope,
                 os.environ.get("FABRIC_SQL_SCOPE"),
-                base.sql_scope,
                 DEFAULT_SQL_SCOPE,
             )
         ),
@@ -111,7 +103,6 @@ def resolve_settings(
             _first(
                 livy_api_version,
                 os.environ.get("FABRIC_LIVY_API_VERSION"),
-                base.livy_api_version,
                 DEFAULT_LIVY_API_VERSION,
             )
         ),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any
 from azure.identity import DefaultAzureCredential
 
 from ._legacy import load_script_module
-from .config import WeaverConfig, WeaverConfigError
+from .errors import CommandError
 
 
 SUPPORTED_WORKSPACE_SUFFIXES = {".ipynb", ".py"}
@@ -21,15 +20,29 @@ class WorkspaceItemSource:
     path: Path
 
 
+@dataclass(frozen=True)
+class WorkspacePushRequest:
+    source: Path
+    workspace_name: str | None
+    workspace_id: str | None
+    item: str | None
+    description: str | None
+    prune: bool
+    update_metadata: bool
+    dry_run: bool
+    api_base_url: str
+    scope: str
+
+
 def discover_workspace_sources(
     source_dir: Path,
     *,
     item_name: str | None = None,
 ) -> list[WorkspaceItemSource]:
     if not source_dir.exists():
-        raise WeaverConfigError(f"workspace source not found: {source_dir}")
+        raise CommandError(f"workspace source not found: {source_dir}")
     if not source_dir.is_dir():
-        raise WeaverConfigError(f"workspace source is not a directory: {source_dir}")
+        raise CommandError(f"workspace source is not a directory: {source_dir}")
 
     items = [
         WorkspaceItemSource(name=path.stem, path=path)
@@ -41,30 +54,21 @@ def discover_workspace_sources(
     if item_name:
         items = [item for item in items if item.name == item_name]
         if not items:
-            raise WeaverConfigError(f"workspace item not found in source: {item_name!r}")
+            raise CommandError(f"workspace item not found in source: {item_name!r}")
     return items
 
 
-def push_workspace(config: WeaverConfig, args: argparse.Namespace) -> dict[str, Any]:
-    """Create or update configured Fabric Notebook items from local workspace files."""
-
-    if config.fabric.workspace is None:
-        raise WeaverConfigError("fabric.workspace is required")
-
+def push_workspace(request: WorkspacePushRequest) -> dict[str, Any]:
+    """Create or update Fabric Notebook items from an explicit request."""
     deploy_notebook = load_script_module("deploy_fabric_notebook")
-    source_dir = args.source or config.fabric.workspace.source
-    if source_dir is None:
-        raise WeaverConfigError("provide --source or configure fabric.workspace.source")
+    source_dir = request.source
+    items = discover_workspace_sources(source_dir, item_name=request.item)
 
-    items = discover_workspace_sources(source_dir, item_name=args.item)
-    workspace_name = args.workspace_name or config.fabric.workspace.name
-
-    if args.dry_run:
+    if request.dry_run:
         return {
-            "config": str(config.path),
             "source": str(source_dir),
-            "workspace_id": args.workspace_id,
-            "workspace_name": workspace_name if not args.workspace_id else None,
+            "workspace_id": request.workspace_id,
+            "workspace_name": request.workspace_name,
             "items": [
                 {"name": item.name, "source_path": str(item.path), "action": "would_push"}
                 for item in items
@@ -73,21 +77,19 @@ def push_workspace(config: WeaverConfig, args: argparse.Namespace) -> dict[str, 
             "success": True,
         }
 
-    if args.prune:
-        raise WeaverConfigError("--prune is not implemented yet; default push never deletes remote items")
-    if not args.workspace_id and not workspace_name:
-        raise WeaverConfigError("provide --workspace-id or configure fabric.workspace.name")
+    if request.prune:
+        raise CommandError("--prune is not implemented yet; default push never deletes remote items")
 
-    token = DefaultAzureCredential().get_token(args.scope).token
-    workspace_id = args.workspace_id or deploy_notebook.resolve_workspace_id(
-        args.api_base_url,
+    token = DefaultAzureCredential().get_token(request.scope).token
+    workspace_id = request.workspace_id or deploy_notebook.resolve_workspace_id(
+        request.api_base_url,
         token,
-        workspace_name,
+        request.workspace_name,
     )
     results = []
     for item in items:
         notebook_id = deploy_notebook.resolve_notebook_id(
-            args.api_base_url,
+            request.api_base_url,
             token,
             workspace_id,
             item.name,
@@ -95,32 +97,31 @@ def push_workspace(config: WeaverConfig, args: argparse.Namespace) -> dict[str, 
         if notebook_id:
             results.append(
                 deploy_notebook.update_notebook_definition(
-                    api_base_url=args.api_base_url,
+                    api_base_url=request.api_base_url,
                     token=token,
                     workspace_id=workspace_id,
                     notebook_id=notebook_id,
                     notebook_name=item.name,
                     source_path=item.path,
-                    update_metadata=args.update_metadata,
+                    update_metadata=request.update_metadata,
                 )
             )
         else:
             results.append(
                 deploy_notebook.create_notebook(
-                    api_base_url=args.api_base_url,
+                    api_base_url=request.api_base_url,
                     token=token,
                     workspace_id=workspace_id,
                     notebook_name=item.name,
                     source_path=item.path,
-                    description=args.description,
+                    description=request.description,
                 )
             )
 
     return {
-        "config": str(config.path),
         "source": str(source_dir),
         "workspace_id": workspace_id,
-        "workspace_name": workspace_name if not args.workspace_id else None,
+        "workspace_name": request.workspace_name,
         "items": results,
         "success": True,
     }

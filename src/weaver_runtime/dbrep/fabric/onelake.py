@@ -1,8 +1,7 @@
 """OneLake resolution + upload for the Fabric Lakehouse dbrep backend.
 
-Thin bridge over the shared :mod:`weaver_runtime.fabric` substrate. Runtime file
-movement goes through the shared folder-sync layer (signature diff, scoped
-delete); ``resolve_lakehouse`` returns a plain dict for backward compatibility.
+Runtime file movement is private to DBRep (signature diff, scoped delete);
+``resolve_lakehouse`` returns a plain dict for backward compatibility.
 """
 
 from __future__ import annotations
@@ -71,8 +70,7 @@ def sync_runtime_folder(
     with the remote documents by the caller.
     """
 
-    from ...fabric import sync as fabric_sync
-    from ...fabric.ignore import default_platform_ignore_spec
+    from . import transfer
 
     files_root = Path(files_root)
     target = _target(resolved)
@@ -103,13 +101,10 @@ def sync_runtime_folder(
         )
 
     for component in components:
-        result = fabric_sync.sync_folder(
+        result = transfer.sync_tree(
             target,
             component.local_root,
             component.remote_root,
-            respect_ignore=False,
-            extra_ignore=default_platform_ignore_spec(),
-            signatures=True,
             delete=True,
             degrees_of_parallelism=degrees_of_parallelism,
         )
@@ -125,12 +120,10 @@ def sync_runtime_folder(
             continue
         if child.name == "_weaver":
             continue
-        result = fabric_sync.sync_folder(
+        result = transfer.sync_tree(
             target,
             child,
             child.name,
-            respect_ignore=False,
-            signatures=True,
             delete=False,
             degrees_of_parallelism=degrees_of_parallelism,
         )
