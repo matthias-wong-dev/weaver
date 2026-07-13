@@ -1,0 +1,34 @@
+## Environment — where things physically live.
+##
+## An environment declares hosts (servers) only. It says nothing about tiers or
+## prod/dev/test: you switch environments by pointing --config at a different
+## file. See docs/configuration.md.
+
+version: 1
+
+servers:
+  # The SES repository. `server` is resolved relative to this file, so `SES`
+  # means the `SES/` folder beside it.
+  Repo:
+    type: SES
+    server: SES
+
+  # A local Lakehouse on disk — a plain folder with `Files/` and `Tables/`.
+  # Resolved relative to this file, so build output lands in `.lakehouse/`.
+  # This host needs no Fabric account and is what getting-started uses.
+  Local_Lakehouse:
+    type: Local Lakehouse
+    server: .lakehouse
+
+  ## Uncomment to target Microsoft Fabric instead of the local Lakehouse. The
+  ## SES objects and their headers do not change — only the hosts do.
+  #
+  # Fabric_Lakehouse:
+  #   type: Fabric Lakehouse
+  #   server: My Workspace/Core        # Workspace / Lakehouse
+  #   environment: simple-ses          # a Fabric environment with weaver-runtime installed
+  #
+  # Warehouse:
+  #   type: SQL
+  #   server: <sql-endpoint>.datawarehouse.fabric.microsoft.com
+  #   degrees_of_parallelism: 8

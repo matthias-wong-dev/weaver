@@ -1,0 +1,51 @@
+## Database representations — what Weaver builds from and to.
+##
+## Every entry is a named database representation: an SES source folder or a
+## live destination. There is no source/target split here — the build command
+## decides direction with --from / --to. See docs/configuration.md.
+
+version: 1
+
+uses:
+  environment: dbrep-env.yml
+
+databases:
+  # --- SES sources (what you author) ---------------------------------------
+  # Each `database` is a folder under the Repo host: SES/Raw, SES/Core, SES/Mart.
+  Raw_SES:
+    type: SES
+    server: Repo
+    database: Raw
+
+  Core_SES:
+    type: SES
+    server: Repo
+    database: Core
+
+  Mart_SES:
+    type: SES
+    server: Repo
+    database: Mart
+
+  # --- Local destinations (what getting-started builds) --------------------
+  # Raw lands as Files; Core materialises as Delta tables. Both live on the
+  # local Lakehouse, so no Fabric account is needed.
+  Raw_Files:
+    type: Files
+    server: Local_Lakehouse
+    database: Raw
+
+  Core_Delta:
+    type: Delta
+    server: Local_Lakehouse
+    database: Core
+
+  ## --- Warehouse destination (needs Microsoft Fabric) ---------------------
+  ## The Mart is SQL: Weaver builds a backing table + view + load procedure in a
+  ## Fabric Warehouse, reading the Core Delta tables through the SQL endpoint.
+  ## Uncomment together with the Warehouse host in dbrep-env.yml.
+  #
+  # Mart_SQL:
+  #   type: SQL
+  #   server: Warehouse
+  #   database: Mart

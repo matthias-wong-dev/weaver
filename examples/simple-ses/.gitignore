@@ -1,0 +1,3 @@
+# Local build output — the on-disk Lakehouse produced by `weaver build`/`load`.
+.lakehouse/
+.weaver/
