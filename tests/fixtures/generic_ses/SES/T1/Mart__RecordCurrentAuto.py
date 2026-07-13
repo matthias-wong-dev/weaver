@@ -16,7 +16,7 @@ from weaver_runtime.dbrep.objects import Table
 
 
 class Mart__RecordCurrentAuto(Table):
-    def read(self, spark):
+    def read(self):
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")
-        return spark.read.option("header", True).csv(csv), ()
+        return self.spark.read.option("header", True).csv(csv), ()

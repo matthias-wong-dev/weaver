@@ -36,14 +36,48 @@ class Source__Archive(Folder):
 
 
 class Sales__CustomerOrder(Table):
-    def read(self, spark):
-        staging_dataframe = build_customer_orders(spark)
+    def read(self):
+        staging_dataframe = build_customer_orders(self.spark)
 
         primary_key_values_to_delete = (("order-17",), ("order-29",))
         return staging_dataframe, primary_key_values_to_delete
 ```
 
 The normal no-delete case for either kind is `return upserts, ()`.
+
+## The object surface
+
+Inside `read()` an object reads everything it needs through ergonomic `self.*`
+accessors — it never touches `self.context`. Weaver populates them from the load
+context, and reads the current table through its Fabric-aware Delta access, so the
+same code runs locally and on Fabric `abfss://` paths.
+
+| Accessor | Kind | Meaning |
+|---|---|---|
+| `self.repo["Schema.Object"]` | both | a resolved dependency (a Folder's path, or a dependency Table's DataFrame) |
+| `self.path` | both | the destination path, read-only — a Delta path for tables, a directory for folders. Do not write here directly. |
+| `self.spark` | both | the active Spark session (`None` for folder-only loads) |
+| `self.log_dir` | both | the current workflow's durable log directory |
+| `self.schema` | Table | the declared ordered `((column, type), …)` schema |
+| `self.primary_key` | Table | the declared primary-key column tuple (empty when none) |
+| `self.is_incremental` | Table | the declared incremental policy |
+| `self.current_dataframe` | Table | the currently persisted table as a DataFrame, or `None` if it has never been written |
+| `self.empty_frame()` | Table | an empty DataFrame in `self.schema` |
+
+`self.current_dataframe` is how a Table introspects its own prior state for
+incremental work — carrying metadata timestamps forward for unchanged rows, or
+reading a watermark column to skip already-loaded inputs. It is `None` on the
+first load, so guard for it:
+
+```python
+class Sales__CustomerOrder(Table):
+    def read(self):
+        incoming = build_customer_orders(self.spark)
+        existing = self.current_dataframe
+        if existing is None:
+            return incoming, ()
+        return preserve_first_seen(incoming, existing, self.primary_key), ()
+```
 
 ## Helpers
 
@@ -163,11 +197,11 @@ Non-matching target files are never counted, changed, or deleted.
 - **Reserved Weaver files** such as `_weaver.json` cannot be staged, replaced, or
   deleted.
 - **Direct writes to the target are unsupported.** Do not write to
-  `self.context.object_path`; stage instead.
+  `self.path`; stage instead.
 
 The `with` block does not own physical cleanup. If object code raises inside it,
 files already written remain in the object-local staging folder. Authors must
-continue writing only to staging, never directly to `self.context.object_path`.
+continue writing only to staging, never directly to `self.path`.
 
 ## The Table pair
 

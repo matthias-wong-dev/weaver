@@ -60,9 +60,9 @@ def _write_fixture(root: Path) -> None:
             from weaver_runtime.dbrep.objects import Table
 
             class Stage__Record(Table):
-                def read(self, spark):
+                def read(self):
                     drop = self.repo["T0.Raw.Drop"]
-                    return spark.read.option("header", True).csv(f"{drop}/drop.csv"), ()
+                    return self.spark.read.option("header", True).csv(f"{drop}/drop.csv"), ()
             '''
         ),
         encoding="utf-8",
@@ -82,7 +82,7 @@ def _write_fixture(root: Path) -> None:
             from weaver_runtime.dbrep.objects import Table
 
             class Mart__Aggregate(Table):
-                def read(self, spark):
+                def read(self):
                     from pyspark.sql import functions as F
                     stage = self.repo["T1.Stage.Record"]
                     return stage.groupBy("group_id").agg(F.sum("amount").alias("amount")), ()

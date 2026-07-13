@@ -53,7 +53,7 @@ def write_python_table(
     source = _docstring(meta) + (
         "\n\nfrom weaver_runtime.dbrep.objects import Table\n\n\n"
         f"class {schema}__{obj}(Table):\n"
-        f"    def read(self, spark):\n"
+        f"    def read(self):\n"
         f"{dep_lines}\n"
         f"        return None, ()\n"
     )

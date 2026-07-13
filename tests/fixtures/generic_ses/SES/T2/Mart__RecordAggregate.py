@@ -12,7 +12,7 @@ from weaver_runtime.dbrep.objects import Table
 
 
 class Mart__RecordAggregate(Table):
-    def read(self, spark):
+    def read(self):
         from pyspark.sql import functions as F
 
         stage = self.repo["T1.Stage.Record"]
