@@ -32,7 +32,7 @@ def _python_object(schema: str, obj: str, *, extra: str = "", class_name: str | 
 
 
         class {cls}(Table):
-            def read(self, spark):
+            def read(self):
                 return None
         '''
     )
@@ -223,12 +223,12 @@ def test_two_weaver_object_classes_rejected(tmp_path: Path) -> None:
 
 
         class Stage__Record(Table):
-            def read(self, spark):
+            def read(self):
                 return None
 
 
         class Extra__Thing(Table):
-            def read(self, spark):
+            def read(self):
                 return None
         '''
     )
@@ -280,7 +280,7 @@ def test_helper_classes_plus_one_object_class_succeeds(tmp_path: Path) -> None:
 
 
         class Stage__Record(Table):
-            def read(self, spark):
+            def read(self):
                 helper = _Helper()
                 return helper.VALUE
         '''

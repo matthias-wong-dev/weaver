@@ -66,7 +66,7 @@ def _write_python_object(path: Path) -> None:
 
 
             class Stage__Record(Table):
-                def read(self, spark):
+                def read(self):
                     drop = self.repo["T0.Raw.Drop"]
                     prior = self.repo["Stage.Prior"]
                     ext = self.repo["T9.External.Source"]

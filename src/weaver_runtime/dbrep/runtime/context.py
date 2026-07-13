@@ -55,6 +55,7 @@ class LoadContext:
     object_path: Path | None = None
     spark: Any = None
     metadata: Any = None
+    schema: tuple[tuple[str, str], ...] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
     workflow_id: str | None = None
     log_dir: Path | None = None
@@ -119,3 +120,23 @@ class LoadContext:
                 f"Folder {self.object_id} reconciled successfully but staging cleanup failed: {exc}"
             ) from exc
         self._issued_staging = None
+
+    def current_dataframe(self):
+        """The current persisted managed Delta table as a DataFrame, or ``None``.
+
+        ``None`` when the table has never been written (or there is no active
+        Spark session / target path). Fabric-correct: the existence probe
+        understands ``abfss://`` OneLake paths, not only local ``_delta_log/``.
+        """
+
+        from .spark_io import read_delta_frame
+
+        return read_delta_frame(self.spark, self.object_path)
+
+    def empty_frame(self):
+        """An empty DataFrame matching the object's declared schema."""
+
+        from .spark_io import empty_frame as _empty_frame
+
+        schema = self.schema or getattr(self.metadata, "schema", None)
+        return _empty_frame(self.spark, schema)

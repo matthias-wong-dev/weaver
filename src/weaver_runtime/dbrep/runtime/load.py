@@ -28,6 +28,11 @@ from .logging import (
     require_load_pair,
 )
 from .rejects import write_rejects
+from .spark_io import (
+    delta_exists,
+    read_delta_rows,
+    struct_type,
+)
 from .workflow_logging import (
     create_workflow_id,
     create_workflow_log_dir,
@@ -289,6 +294,9 @@ def _execute_table_step(
     """Run ``Table.read()`` under the governed load policy and map to CRUD."""
 
     table_path = _join_root(spark_root, materialisation)
+    # Resolve the schema before the object runs so ``self.schema`` /
+    # ``self.empty_frame()`` see exactly the schema the runtime will cast to.
+    schema = schema_by_id.get(object_id, source_object.metadata.schema)
     context = LoadContext(
         runtime_root=runtime_root,
         lakehouse_root=lakehouse_root,
@@ -299,15 +307,15 @@ def _execute_table_step(
         object_path=table_path,
         spark=spark,
         metadata=source_object.metadata,
+        schema=schema,
     )
-    result = _instantiate(source_object, context).read(spark)
+    result = _instantiate(source_object, context).read()
     staging_dataframe, delete_keys = require_load_pair(result, "Table")
     _require_dataframe(staging_dataframe)
 
-    schema = schema_by_id.get(object_id, source_object.metadata.schema)
     frame = _align_frame_to_schema(staging_dataframe, schema)
     incoming = [row.asDict(recursive=True) for row in frame.collect()]
-    existing = _read_delta_rows(spark, table_path)
+    existing = read_delta_rows(spark, table_path)
     metadata = source_object.metadata
     outcome = run_table_load(
         existing,
@@ -452,24 +460,6 @@ def _join_root(root, relative: str):
     return Path(root) / relative
 
 
-def _delta_exists(spark, table_path) -> bool:
-    path_str = str(table_path)
-    if "://" in path_str:
-        try:
-            spark.read.format("delta").load(path_str).schema
-            return True
-        except Exception:
-            return False
-    return (Path(table_path) / "_delta_log").is_dir()
-
-
-def _read_delta_rows(spark, table_path) -> list[dict]:
-    if not _delta_exists(spark, table_path):
-        return []
-    frame = spark.read.format("delta").load(str(table_path))
-    return [row.asDict(recursive=True) for row in frame.collect()]
-
-
 def _require_dataframe(value) -> None:
     """Require a Table ``read()`` to stage a Spark DataFrame as its first value."""
 
@@ -508,10 +498,10 @@ def _align_frame_to_schema(frame, schema):
 def _write_delta(spark, outcome, table_path, schema) -> None:
     rows = outcome.final_rows
     if rows:
-        frame = spark.createDataFrame(rows, schema=_struct_type(schema))
+        frame = spark.createDataFrame(rows, schema=struct_type(schema))
     elif schema:
-        frame = spark.createDataFrame([], schema=_struct_type(schema))
-    elif _delta_exists(spark, table_path):
+        frame = spark.createDataFrame([], schema=struct_type(schema))
+    elif delta_exists(spark, table_path):
         empty = spark.read.format("delta").load(str(table_path)).schema
         frame = spark.createDataFrame([], schema=empty)
     else:
@@ -519,32 +509,6 @@ def _write_delta(spark, outcome, table_path, schema) -> None:
     frame.write.format("delta").mode("overwrite").option(
         "overwriteSchema", "true"
     ).save(str(table_path))
-
-
-def _struct_type(schema):
-    if not schema:
-        return None
-    from pyspark.sql.types import StructField, StructType
-
-    fields = [
-        StructField(column, _spark_data_type(type_name), True)
-        for column, type_name in schema
-    ]
-    return StructType(fields)
-
-
-def _spark_data_type(type_name: str):
-    """Parse a Spark SQL / Delta column type string into a PySpark DataType."""
-
-    from pyspark.sql.types import _parse_datatype_string
-
-    try:
-        return _parse_datatype_string(type_name)
-    except Exception as exc:
-        raise LoadError(
-            f"failed to parse Spark SQL schema type {type_name!r}; "
-            "use a Spark/Delta-compatible type string"
-        ) from exc
 
 
 def _schema_by_object(column_dictionary: dict) -> dict[str, tuple[tuple[str, str], ...]]:

@@ -5,10 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from weaver_runtime.dbrep.fabric import onelake as dbrep_onelake
+from weaver_runtime.dbrep.fabric import onelake as dbrep_onelake, transfer
 from weaver_runtime.dbrep.lakehouse.artifacts import RuntimeComponent
-from weaver_runtime.fabric import onelake, sync
-from weaver_runtime.fabric.ignore import default_platform_ignore_spec
+from weaver_runtime.fabric import onelake
 
 
 def _resolved() -> dict:
@@ -56,7 +55,7 @@ def test_runtime_sync_uses_independent_components_and_individual_metadata(
         sync_calls.append((Path(source), remote, kwargs))
         return {"files": {"uploaded": 1}}
 
-    monkeypatch.setattr(sync, "sync_folder", fake_sync)
+    monkeypatch.setattr(transfer, "sync_tree", fake_sync)
     monkeypatch.setattr(
         dbrep_onelake,
         "upload_file",
@@ -74,13 +73,6 @@ def test_runtime_sync_uses_independent_components_and_individual_metadata(
     ]
     assert all(call[2]["delete"] for call in sync_calls[:2])
     assert sync_calls[2][2]["delete"] is False
-    assert all(
-        call[2]["extra_ignore"].match("pkg/__pycache__", is_dir=True)
-        for call in sync_calls[:2]
-    )
-    assert all(
-        call[2]["extra_ignore"].match("pkg/cache.pyo") for call in sync_calls[:2]
-    )
     assert [path for path, _content in uploads] == [
         f"_weaver/runtime/{name}" for name in dbrep_onelake.RUNTIME_METADATA_NAMES
     ]
@@ -96,27 +88,25 @@ def test_runtime_cache_files_are_excluded_and_old_remote_caches_deleted(
     (tmp_path / "keep.py").write_text("keep", encoding="utf-8")
     deleted = []
 
-    monkeypatch.setattr(sync, "_read_remote_signatures", lambda *args: {})
+    monkeypatch.setattr(transfer, "_read_remote_signatures", lambda *args: {})
     monkeypatch.setattr(
-        sync,
+        transfer,
         "_list_remote_payload_paths",
         lambda *args: {"__pycache__/old.pyc", "old.pyo"},
     )
     monkeypatch.setattr(onelake, "ensure_directory", lambda *args: None)
     monkeypatch.setattr(onelake, "upload_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(onelake, "delete_file", lambda target, path: deleted.append(path))
-    monkeypatch.setattr(sync, "remove_empty_directories", lambda *args: [])
+    monkeypatch.setattr(transfer, "remove_empty_directories", lambda *args: [])
 
-    result = sync.sync_folder(
+    result = transfer.sync_tree(
         _target(),
         tmp_path,
         "_weaver/runtime/objects/T0",
-        respect_ignore=False,
-        extra_ignore=default_platform_ignore_spec(),
         delete=True,
+        degrees_of_parallelism=32,
     )
 
-    assert result["files"]["ignored"] == 2
     assert result["deleted_paths"] == ["__pycache__/old.pyc", "old.pyo"]
     assert sorted(deleted) == [
         "_weaver/runtime/objects/T0/__pycache__/old.pyc",
@@ -142,7 +132,7 @@ def test_empty_directory_cleanup_is_scoped_and_preserves_zero_byte_file(monkeypa
         onelake, "delete_directory", lambda target, path: deleted.append(path) or True
     )
 
-    removed = sync.remove_empty_directories(
+    removed = transfer.remove_empty_directories(
         _target(), "_weaver/runtime/objects/T0"
     )
 
@@ -163,7 +153,7 @@ def test_empty_directory_cleanup_rejects_paths_outside_component(monkeypatch) ->
         onelake, "delete_directory", lambda *args: pytest.fail("must not delete")
     )
     with pytest.raises(onelake.OneLakeError, match="outside target"):
-        sync.remove_empty_directories(_target(), "_weaver/runtime/objects/T0")
+        transfer.remove_empty_directories(_target(), "_weaver/runtime/objects/T0")
 
 
 def test_read_runtime_metadata_reads_only_named_json_documents(monkeypatch) -> None:

@@ -7,7 +7,7 @@ runtime surfaces:
 
 - Fabric authentication and API helpers.
 - Fabric capacity control.
-- General OneLake folder sync + platform mirror push (no Git required).
+- Internal DBRep OneLake transfer for remote runtime and build payloads.
 - Fabric workspace item deployment.
 - Fabric notebook execution.
 - Fabric Spark execution via Livy.
@@ -16,7 +16,7 @@ runtime surfaces:
 - Configuration loading and CLI routing.
 
 The shared Fabric substrate lives under `src/weaver_runtime/fabric/`
-(`auth`, `client`, `resources`, `onelake`, `ignore`, `sync`, `livy`, `sql`,
+(`auth`, `client`, `resources`, `onelake`, `livy`, `sql`,
 `settings`, `context`). New Fabric behaviour belongs there, not in `scripts/`.
 
 Weaver must stay environment-neutral. Do not add defaults for product names,
@@ -26,7 +26,7 @@ notebook names, production endpoints, or local platform paths.
 Allowed defaults are generic technical values, such as Fabric API URLs,
 authentication scopes, Livy API version, timeouts, polling intervals, and
 degrees of parallelism. These live in `fabric/settings.py` and resolve
-CLI override -> environment config -> technical default.
+CLI override -> environment variable -> technical default.
 
 ## Command Surface
 
@@ -41,15 +41,11 @@ cd /Users/matthiaswong/dev/dwg-platform
 Normal product use passes configuration from the product repo:
 
 ```bash
-.venv/bin/weaver fabric capacity status --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric capacity resume --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric capacity suspend --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric onelake sync --config ilovegov-dwg/etl/weaver.yaml --source <folder> --target-folder <Files-relative folder>
-.venv/bin/weaver fabric platform push --config ilovegov-dwg/etl/weaver.yaml [--name weaver] [--dry-run]
-.venv/bin/weaver fabric workspace push --config ilovegov-dwg/etl/weaver.yaml
-.venv/bin/weaver fabric notebook run --config ilovegov-dwg/etl/weaver.yaml --name "Notebook name"
-.venv/bin/weaver fabric livy submit --config ilovegov-dwg/etl/weaver.yaml --kind pyspark --file path/to/code.py
-.venv/bin/weaver fabric sql execute --config ilovegov-dwg/etl/weaver.yaml --file path/to/query.sql
+.venv/bin/weaver fabric capacity status --resource-group <resource-group> --capacity-name <capacity>
+.venv/bin/weaver fabric capacity resume --resource-group <resource-group> --capacity-name <capacity>
+.venv/bin/weaver fabric capacity suspend --resource-group <resource-group> --capacity-name <capacity>
+.venv/bin/weaver fabric workspace push --source <workspace-source> --workspace-name <workspace>
+.venv/bin/weaver fabric notebook run --workspace-name <workspace> --name "Notebook name"
 ```
 
 SES create/wipe now runs through the lifecycle, not a dedicated command:
@@ -128,8 +124,8 @@ Source objects for a SQL target must be `.sql`.
 
 Declare a `Fabric Lakehouse` server with `server: Workspace/Lakehouse` and an
 optional Fabric `environment` name.
-Build stages the bundle locally then syncs `Files/` to OneLake through the shared
-movement layer (`weaver_runtime.fabric.sync`): `Files/_weaver/runtime` syncs with
+Build stages the bundle locally then transfers `Files/` to OneLake through the
+private DBRep movement layer (`weaver_runtime.dbrep.fabric.transfer`): `Files/_weaver/runtime` transfers with
 signature diff + scoped delete (Weaver-owned), object folders sync without
 delete. Load submits the bundled orchestrator to Fabric Spark via Livy
 (`weaver_runtime.fabric.livy`): it mounts the Lakehouse for orchestrator import +
