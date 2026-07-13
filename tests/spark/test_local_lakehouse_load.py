@@ -8,7 +8,8 @@ import pytest
 from dbrep_helpers import write_config_files
 from weaver_runtime.cli import main
 from weaver_runtime.dbrep.build.manifest import read_json
-from weaver_runtime.dbrep.runtime.load import _schema_by_object, _struct_type
+from weaver_runtime.dbrep.runtime.load import _schema_by_object
+from weaver_runtime.dbrep.runtime.spark_io import struct_type
 from weaver_runtime.dbrep.runtime.orchestrator import load_target_runtime
 
 pytestmark = pytest.mark.spark
@@ -43,7 +44,7 @@ def _expected_schema(runtime: Path, object_id: str):
     """Build the declared Spark schema for an object from the installed runtime."""
 
     column_dictionary = read_json(runtime / "column_dictionary.json")
-    return _struct_type(_schema_by_object(column_dictionary)[object_id])
+    return struct_type(_schema_by_object(column_dictionary)[object_id])
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -258,7 +259,7 @@ def test_build_fails_when_table_declares_no_schema(tmp_path: Path) -> None:
         '"""\n\n'
         "from weaver_runtime.dbrep.objects import Table\n\n\n"
         "class Stage__NoSchema(Table):\n"
-        "    def read(self, spark):\n"
+        "    def read(self):\n"
         f"        open({str(sentinel)!r}, 'w').close()\n"
         "        return None\n",
         encoding="utf-8",
@@ -275,3 +276,58 @@ def test_build_fails_when_table_declares_no_schema(tmp_path: Path) -> None:
     assert "T1.Stage.NoSchema" in message  # identified by full ID
     assert "requires a declared schema" in message
     assert not sentinel.exists()  # read() was never executed
+
+
+def test_authoring_accessors_expose_current_state(tmp_path: Path, spark) -> None:
+    """The self.* authoring surface resolves current state during read()."""
+
+    from types import SimpleNamespace
+
+    from weaver_runtime.dbrep.objects import Table
+    from weaver_runtime.dbrep.runtime.context import LoadContext
+
+    schema = (("record_id", "string"), ("amount", "int"))
+    table_path = tmp_path / "Tables" / "Stage" / "Record"
+
+    def make_object() -> Table:
+        return Table(
+            LoadContext(
+                runtime_root=tmp_path,
+                lakehouse_root=tmp_path,
+                object_id="T1.Stage.Record",
+                kind="Table",
+                materialisation="Tables/Stage/Record",
+                repo=None,
+                object_path=table_path,
+                spark=spark,
+                metadata=SimpleNamespace(
+                    schema=schema, primary_key=("record_id",), is_incremental=True
+                ),
+                schema=schema,
+            )
+        )
+
+    obj = make_object()
+
+    # Simple pass-throughs.
+    assert obj.path == table_path
+    assert obj.spark is spark
+    assert obj.schema == schema
+    assert obj.primary_key == ("record_id",)
+    assert obj.is_incremental is True
+
+    # Before the table is written, the current frame is None and empty_frame()
+    # yields a zero-row frame in the declared schema.
+    assert obj.current_dataframe is None
+    empty = obj.empty_frame()
+    assert empty.count() == 0
+    assert [field.name for field in empty.schema.fields] == ["record_id", "amount"]
+
+    # After a write, current_dataframe returns exactly the persisted rows.
+    spark.createDataFrame(
+        [("r1", 10), ("r2", 20)], schema=["record_id", "amount"]
+    ).write.format("delta").mode("overwrite").save(str(table_path))
+
+    current = make_object().current_dataframe
+    assert current is not None
+    assert {row["record_id"] for row in current.collect()} == {"r1", "r2"}

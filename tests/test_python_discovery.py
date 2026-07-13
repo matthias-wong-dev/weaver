@@ -18,7 +18,7 @@ def test_finds_two_and_three_part_self_repo_references() -> None:
         """
 
         class StageRecord:
-            def read(self, spark):
+            def read(self):
                 drop = self.repo["T0.Raw.Drop"]
                 prior = self.repo["Stage.Prior"]
                 return drop.join(prior)
@@ -34,7 +34,7 @@ def test_deduplicates_and_preserves_order() -> None:
         '''
         """doc"""
         class X:
-            def read(self, spark):
+            def read(self):
                 a = self.repo["A.B"]
                 b = self.repo["C.D"]
                 a2 = self.repo["A.B"]
@@ -48,7 +48,7 @@ def test_ignores_non_self_repo_subscripts_and_dynamic_keys() -> None:
         '''
         """doc"""
         class X:
-            def read(self, spark):
+            def read(self):
                 other = some_dict["A.B"]
                 name = "C.D"
                 dyn = self.repo[name]
@@ -59,11 +59,11 @@ def test_ignores_non_self_repo_subscripts_and_dynamic_keys() -> None:
 
 
 def test_four_part_reference_is_returned() -> None:
-    source = '"""doc"""\nclass X:\n    def read(self, spark):\n        x = self.repo["Srv.Db.Schema.Object"]\n'
+    source = '"""doc"""\nclass X:\n    def read(self):\n        x = self.repo["Srv.Db.Schema.Object"]\n'
     assert extract_python_references(source) == (("Srv", "Db", "Schema", "Object"),)
 
 
 def test_single_part_reference_is_rejected() -> None:
-    source = '"""doc"""\nclass X:\n    def read(self, spark):\n        x = self.repo["Record"]\n'
+    source = '"""doc"""\nclass X:\n    def read(self):\n        x = self.repo["Record"]\n'
     with pytest.raises(DependencyError, match="at least Schema.Object"):
         extract_python_references(source)

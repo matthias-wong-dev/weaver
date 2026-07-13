@@ -88,7 +88,8 @@ def initialise_delta_tables(specs, *, spark, spark_root) -> InitialiseReport:
     schema fails the build before any table is created.
     """
 
-    from .load import _delta_exists, _join_root, _struct_type
+    from .load import _join_root
+    from .spark_io import delta_exists, struct_type
 
     specs = list(specs)
     validate_delta_specs(specs)
@@ -97,10 +98,10 @@ def initialise_delta_tables(specs, *, spark, spark_root) -> InitialiseReport:
     existing: list[str] = []
     for spec in specs:
         table_path = _join_root(spark_root, spec["materialisation"])
-        if _delta_exists(spark, table_path):
+        if delta_exists(spark, table_path):
             existing.append(spec["id"])
             continue
-        empty = spark.createDataFrame([], schema=_struct_type(spec["schema"]))
+        empty = spark.createDataFrame([], schema=struct_type(spec["schema"]))
         empty.write.format("delta").mode("overwrite").save(str(table_path))
         created.append(spec["id"])
 

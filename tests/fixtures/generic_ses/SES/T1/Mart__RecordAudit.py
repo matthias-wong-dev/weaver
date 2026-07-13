@@ -17,10 +17,10 @@ from weaver_runtime.dbrep.objects import Table
 
 
 class Mart__RecordAudit(Table):
-    def read(self, spark):
+    def read(self):
         from pyspark.sql import functions as F
 
         drop = self.repo["T0.Raw.Drop"]
         csv = str(Path(drop) / "drop.csv")
-        frame = spark.read.option("header", True).csv(csv)
+        frame = self.spark.read.option("header", True).csv(csv)
         return frame.withColumn("audit_id", F.expr("uuid()")), ()
