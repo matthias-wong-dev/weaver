@@ -61,8 +61,18 @@ def _write_fixture(root: Path) -> None:
 
             class Stage__Record(Table):
                 def read(self):
-                    drop = self.repo["T0.Raw.Drop"]
-                    return self.spark.read.option("header", True).csv(f"{drop}/drop.csv"), ()
+                    import csv
+                    from pathlib import Path
+
+                    path = Path(self.repo["T0.Raw.Drop"]) / "drop.csv"
+                    with path.open(newline="", encoding="utf-8") as handle:
+                        rows = [
+                            (row["record_id"], row["group_id"], int(row["amount"]))
+                            for row in csv.DictReader(handle)
+                        ]
+                    return self.spark.createDataFrame(
+                        rows, "record_id string, group_id string, amount int"
+                    ), ()
             '''
         ),
         encoding="utf-8",

@@ -4,9 +4,11 @@ Build executes DDL layer by layer using the dbrep dependency graph (no retry
 loops). Independent objects within a layer run in parallel, bounded by the SQL
 server's ``degrees_of_parallelism``. For each Table object it installs a
 self-inferring backing table + view and a load stored procedure; for each View
-object it installs the view. A ``_weaver.objects`` metadata table inside the
-target database records managed objects so ``--prune`` can drop only removed
-managed objects. Load executes installed load procedures in dependency order.
+object it installs the view. Shared ``_`` and ``_weaver`` schemas are created
+serially before any parallel object work. A ``_weaver.objects`` metadata table
+inside the target database records managed objects so ``--prune`` can drop only
+removed managed objects. Load executes installed load procedures in dependency
+order.
 
 The backend is self-contained: it reads only the SQL SES source objects and its
 own in-database metadata table. It does not depend on any Lakehouse runtime.
@@ -34,6 +36,7 @@ from .ddl import (
 from .etl import generate_load_stored_procedure_sql
 
 MANAGED_SCHEMA = "_weaver"
+LOAD_PROCEDURE_SCHEMA = "_"
 MANIFEST_TABLE = "_weaver.objects"
 
 _ENSURE_MANIFEST_TABLE_SQL = f"""
@@ -206,7 +209,8 @@ def build_sql_target(
     layer_index = {object_id: index for index, layer in enumerate(layers) for object_id in layer}
 
     schemas = sorted(
-        {planned.source.metadata.object_id.schema for planned in objects} | {MANAGED_SCHEMA}
+        {planned.source.metadata.object_id.schema for planned in objects}
+        | {LOAD_PROCEDURE_SCHEMA, MANAGED_SCHEMA}
     )
 
     def _setup():

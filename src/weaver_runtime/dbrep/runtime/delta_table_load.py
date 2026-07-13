@@ -243,17 +243,25 @@ def _merge_upsert(
     upsert_condition = f"source.{_quote(operation_column)} = 'upsert'"
     delete_condition = f"source.{_quote(operation_column)} = 'delete'"
     values = {column: f"source.{_quote(column)}" for column in columns}
+    compare_columns = tuple(column for column in columns if column not in primary_key)
 
+    previous_version = _last_version(delta)
     merger = delta.alias("target").merge(source.alias("source"), condition)
     if explicit_delete_keys:
         merger = merger.whenMatchedDelete(condition=delete_condition)
-    merger = merger.whenMatchedUpdate(condition=upsert_condition, set=values)
+    if compare_columns:
+        unchanged_condition = " and ".join(
+            f"target.{_quote(column)} <=> source.{_quote(column)}"
+            for column in compare_columns
+        )
+        update_condition = f"{upsert_condition} and not ({unchanged_condition})"
+        merger = merger.whenMatchedUpdate(condition=update_condition, set=values)
     merger = merger.whenNotMatchedInsert(condition=upsert_condition, values=values)
     if reconciliation_ran:
         merger = merger.whenNotMatchedBySourceDelete()
     merger.execute()
 
-    metrics = _last_operation_metrics(delta)
+    metrics = _last_operation_metrics(delta, after_version=previous_version)
     inserted = _metric(metrics, "numTargetRowsInserted", "numInsertedRows")
     updated = _metric(metrics, "numTargetRowsUpdated", "numUpdatedRows")
     deleted = _metric(metrics, "numTargetRowsDeleted", "numDeletedRows")
@@ -267,7 +275,7 @@ def _merge_upsert(
         deleted=deleted,
         explicit_read=explicit_read,
         explicit_matched=explicit_matched,
-        wrote=True,
+        wrote=bool(inserted or updated or deleted),
     )
 
 
@@ -335,8 +343,14 @@ def _delta_table(spark, table_path):
     return DeltaTable.forPath(spark, str(table_path))
 
 
-def _last_operation_metrics(delta) -> dict[str, str]:
-    row = delta.history(1).select("operationMetrics").head()
+def _last_version(delta) -> int:
+    return int(delta.history(1).select("version").head()["version"])
+
+
+def _last_operation_metrics(delta, *, after_version: int | None = None) -> dict[str, str]:
+    row = delta.history(1).select("version", "operationMetrics").head()
+    if after_version is not None and int(row["version"]) <= after_version:
+        return {}
     return dict(row["operationMetrics"] or {})
 
 

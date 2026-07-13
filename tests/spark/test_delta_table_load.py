@@ -66,6 +66,92 @@ def test_empty_incremental_load_is_a_true_delta_noop(tmp_path: Path, spark) -> N
     ]
 
 
+def test_merge_updates_only_changed_matches(tmp_path: Path, spark) -> None:
+    path = tmp_path / "changed_matches"
+    _write(spark, path, [("r1", 10), ("r2", None), ("r3", 30)])
+
+    outcome = execute_delta_table_load(
+        spark,
+        _frame(spark, [("r1", 10), ("r2", 20), ("r3", 30), ("r4", 40)]),
+        path,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=True,
+        object_name="T1.Mart.Record",
+    )
+
+    assert outcome.counts() == {
+        "input": 4,
+        "accepted": 4,
+        "rejected": 0,
+        "inserted": 1,
+        "updated": 1,
+        "deleted": 0,
+    }
+    assert outcome.wrote is True
+
+
+def test_all_unchanged_merge_reports_no_crud(tmp_path: Path, spark) -> None:
+    path = tmp_path / "unchanged_matches"
+    existing = [("r1", 10), ("r2", None)]
+    _write(spark, path, existing)
+
+    outcome = execute_delta_table_load(
+        spark,
+        _frame(spark, existing),
+        path,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=False,
+        object_name="T1.Mart.Record",
+    )
+
+    assert outcome.counts() == {
+        "input": 2,
+        "accepted": 2,
+        "rejected": 0,
+        "inserted": 0,
+        "updated": 0,
+        "deleted": 0,
+    }
+    assert outcome.wrote is False
+
+
+def test_noop_merge_does_not_reuse_previous_merge_metrics(tmp_path: Path, spark) -> None:
+    path = tmp_path / "stale_metrics"
+    _write(spark, path, [("r1", 10)])
+
+    changed = execute_delta_table_load(
+        spark,
+        _frame(spark, [("r1", 20)]),
+        path,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=False,
+        object_name="T1.Mart.Record",
+    )
+    unchanged = execute_delta_table_load(
+        spark,
+        _frame(spark, [("r1", 20)]),
+        path,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=False,
+        object_name="T1.Mart.Record",
+    )
+
+    assert changed.updated == 1
+    assert unchanged.counts() == {
+        "input": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "inserted": 0,
+        "updated": 0,
+        "deleted": 0,
+    }
+    assert unchanged.wrote is False
+
+
 @pytest.mark.parametrize(
     ("name", "incoming", "is_incremental", "delete_keys"),
     [

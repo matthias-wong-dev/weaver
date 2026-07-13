@@ -161,6 +161,7 @@ def run_table_load(
         list(existing_rows),
         accepted,
         primary_key,
+        columns,
         plan.mode,
         plan.reconciliation_ran,
         plan.explicit_delete_keys,
@@ -294,7 +295,15 @@ def _validate_primary_key(rows, primary_key):
     return accepted, rejects
 
 
-def _plan_write(existing, accepted, primary_key, mode, reconciliation_ran, explicit_keys):
+def _plan_write(
+    existing,
+    accepted,
+    primary_key,
+    columns,
+    mode,
+    reconciliation_ran,
+    explicit_keys,
+):
     no_explicit = (0, 0, 0)
     if not primary_key:
         return list(accepted), len(accepted), 0, len(existing), no_explicit
@@ -311,7 +320,13 @@ def _plan_write(existing, accepted, primary_key, mode, reconciliation_ran, expli
     incoming_keys = set(incoming_by_key)
 
     inserted = len(incoming_keys - existing_keys)
-    updated = len(incoming_keys & existing_keys)
+    compare_columns = tuple(column for column in columns if column not in primary_key)
+    updated = sum(
+        _rows_differ(
+            existing_by_key[key], incoming_by_key[key], compare_columns
+        )
+        for key in incoming_keys & existing_keys
+    )
 
     if reconciliation_ran:
         deleted = len(existing_keys - incoming_keys)
@@ -353,6 +368,10 @@ def _is_blank_key(row: dict, primary_key: Iterable[str]) -> bool:
 
 def _key(row: dict, primary_key: Iterable[str]) -> tuple:
     return tuple(row.get(column) for column in primary_key)
+
+
+def _rows_differ(existing: dict, incoming: dict, columns: Iterable[str]) -> bool:
+    return any(existing.get(column) != incoming.get(column) for column in columns)
 
 
 def _reject(row: dict, reason: str) -> dict:

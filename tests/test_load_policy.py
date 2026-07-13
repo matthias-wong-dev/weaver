@@ -57,6 +57,45 @@ def test_incremental_primary_key_keeps_missing() -> None:
     assert outcome.reconciliation_ran is False
 
 
+def test_matching_identical_rows_are_not_updates() -> None:
+    existing = _rows(
+        ("r1", "A", 10),
+        ("r2", None, 20),
+        ("r3", "B", 30),
+    )
+    incoming = _rows(
+        ("r1", "A", 10),
+        ("r2", None, 20),
+        ("r3", "B", 31),
+        ("r4", "C", 40),
+    )
+
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=True,
+    )
+
+    assert (outcome.inserted, outcome.updated, outcome.deleted) == (1, 1, 0)
+
+
+def test_null_transitions_are_updates() -> None:
+    existing = _rows(("r1", None, 10), ("r2", "A", 20))
+    incoming = _rows(("r1", "A", 10), ("r2", None, 20))
+
+    outcome = run_table_load(
+        existing,
+        incoming,
+        primary_key=("record_id",),
+        schema=SCHEMA,
+        is_incremental=True,
+    )
+
+    assert outcome.updated == 2
+
+
 def test_non_incremental_primary_key_removes_missing() -> None:
     existing = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
     incoming = _rows(("r2", "A", 22), ("r3", "B", 33), ("r4", "B", 40))
