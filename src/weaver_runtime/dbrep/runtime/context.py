@@ -42,8 +42,8 @@ class LoadContext:
 
     For Folder objects ``object_path`` is the destination directory (readable but
     not to be written directly); object code stages files through
-    :meth:`staging_folder`. ``workflow_id``, ``log_dir`` and ``staging_root``
-    carry the current workflow's durable-logging and staging locations.
+    :meth:`staging_folder`. ``workflow_id`` and ``log_dir`` identify durable
+    workflow logging; ``staging_path`` is the exact object-local staging sibling.
     """
 
     runtime_root: Path
@@ -58,50 +58,64 @@ class LoadContext:
     extras: dict[str, Any] = field(default_factory=dict)
     workflow_id: str | None = None
     log_dir: Path | None = None
-    staging_root: Path | None = None
-    _issued_staging: list = field(default_factory=list, repr=False)
+    staging_path: Path | None = None
+    _issued_staging: "StagingFolder | None" = field(default=None, repr=False)
+    _staging_requested: bool = field(default=False, repr=False)
+
+    def prepare_staging(self) -> "StagingFolder":
+        """Reset and create this Folder step's deterministic staging path."""
+
+        from .folders import new_staging_folder
+
+        if self.staging_path is None or self.object_path is None:
+            raise LoadError(f"no object-local staging path available for {self.object_id}")
+        if self._issued_staging is None:
+            self._issued_staging = new_staging_folder(
+                self.staging_path,
+                destination=self.object_path,
+                lakehouse_root=self.lakehouse_root,
+            )
+        return self._issued_staging
 
     def staging_folder(self) -> "StagingFolder":
-        """Issue a fresh, empty staging directory beneath the workflow root.
+        """Return this step's empty object-local staging directory.
 
         Object code writes its retained output into ``staging.path`` and returns
         the ``(staging_folder, delete)`` pair; Weaver reconciles the
         staged files into the destination and calculates file CRUD.
         """
 
-        from .folders import new_staging_folder
-
-        if self.staging_root is None:
-            raise LoadError(
-                f"no staging root available for {self.object_id}; Folder staging "
-                "requires an active load workflow"
-            )
-        staging = new_staging_folder(self.staging_root)
-        self._issued_staging.append(staging)
+        staging = self.prepare_staging()
+        if self._staging_requested:
+            raise LoadError(f"Folder staging has already been created for {self.object_id}")
+        self._staging_requested = True
         return staging
 
     def issued_staging(self) -> tuple["StagingFolder", ...]:
         """Staging folders issued to this object during the current step."""
 
-        return tuple(self._issued_staging)
+        return () if self._issued_staging is None else (self._issued_staging,)
 
     def cleanup_staging(self) -> None:
-        """Remove every staging directory issued to this object.
+        """Remove only this object's validated staging sibling after success."""
 
-        Only removes paths under ``staging_root`` so a validation failure that
-        returned an arbitrary path can never delete outside the staging area.
-        """
+        staging = self._issued_staging
+        if staging is None:
+            return
+        if self.staging_path is None or self.object_path is None:
+            raise LoadError(f"cannot safely clean staging for {self.object_id}")
 
-        root = self.staging_root
-        for staging in self._issued_staging:
-            if root is not None and _is_within(staging.path, root):
-                shutil.rmtree(staging.path, ignore_errors=True)
-        self._issued_staging.clear()
+        from .folders import validate_staging_path_pair
 
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        Path(path).resolve().relative_to(Path(root).resolve())
-        return True
-    except ValueError:
-        return False
+        _lakehouse, _destination, expected = validate_staging_path_pair(
+            self.lakehouse_root, self.object_path, self.staging_path
+        )
+        if staging.path.resolve() != expected:
+            raise LoadError(f"issued staging path changed for {self.object_id}")
+        try:
+            shutil.rmtree(staging.path)
+        except Exception as exc:
+            raise LoadError(
+                f"Folder {self.object_id} reconciled successfully but staging cleanup failed: {exc}"
+            ) from exc
+        self._issued_staging = None

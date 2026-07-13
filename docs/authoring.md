@@ -112,6 +112,21 @@ with self.staging_folder() as staging_folder:
 return staging_folder, ()
 ```
 
+The staging directory is a physical sibling of the target named
+`<FolderName>_Staging`. For example, while `Agor.OrganisationCsv` is running:
+
+```text
+Files/T0_DWG/Agor/
+├── OrganisationCsv/
+└── OrganisationCsv_Staging/
+```
+
+A new attempt clears and recreates this directory before `read()` runs. Weaver
+removes it only after validation and reconciliation both succeed. If authoring,
+validation, reconciliation, or final cleanup fails, staging is retained beside
+the target for diagnosis; the next deliberate retry clears it before rebuilding.
+Only one staging folder may be requested during an object step.
+
 Every Folder metadata block must explicitly declare its managed file population.
 Folders default to `Incremental: true`; declare `false` when each result is the
 complete managed population:
@@ -150,9 +165,9 @@ Non-matching target files are never counted, changed, or deleted.
 - **Direct writes to the target are unsupported.** Do not write to
   `self.context.object_path`; stage instead.
 
-If object code raises inside the `with` block, Weaver cleans the staging folder
-automatically; on a normal return Weaver consumes and then cleans it after
-reconciliation.
+The `with` block does not own physical cleanup. If object code raises inside it,
+files already written remain in the object-local staging folder. Authors must
+continue writing only to staging, never directly to `self.context.object_path`.
 
 ## The Table pair
 

@@ -95,7 +95,7 @@ import them only when SQL discovery / SQL connections actually run.
 ### Object authoring and runtime logging (`dbrep/runtime`)
 
 Both kinds implement `read()` returning one `(upserts, deletes)` pair (never
-`load()`): `Folder.read()` → `(staging_folder, file_names_to_delete)` staged in a Weaver-issued folder (object code
+`load()`): `Folder.read()` → `(staging_folder, file_names_to_delete)` staged in a Weaver-issued object-local `<Folder>_Staging` sibling (retained on failure and cleared on retry; object code
 never writes the destination directly); `Table.read(spark)` →
 `(staging_dataframe, primary_key_values_to_delete)`. Weaver owns all
 mutation, CRUD counting, and logging. Deletion has one authority: a table without

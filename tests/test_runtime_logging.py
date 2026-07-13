@@ -73,8 +73,12 @@ from weaver_runtime.dbrep.objects import Folder
 class Raw__Second(Folder):
     def read(self):
         _ = self.repo["Raw.First"]
-        raise RuntimeError("second boom")
+        with self.staging_folder() as staging:
+            (staging.path / "partial.csv").write_text("partial", encoding="utf-8")
+            raise RuntimeError("second boom")
 '''
+
+FIRST_COMPLETE = FIRST.replace("Incremental: true", "Incremental: false")
 
 
 def _install_files_runtime(tmp_path: Path, objects: dict[str, str]) -> Path:
@@ -123,6 +127,29 @@ def test_load_creates_single_workflow_dir_with_one_file_per_step(tmp_path: Path)
     assert len(step_files) == 2
     for step_file in step_files:
         assert STEP_FILE_RE.match(step_file.name)
+    assert not (tmp_path / "lake" / "Files" / "T0" / "Raw" / "First_Staging").exists()
+    assert not (tmp_path / "lake" / "Files" / "T0" / "Raw" / "Second_Staging").exists()
+    assert not (tmp_path / "lake" / "Files" / "_weaver" / "staging").exists()
+
+
+@pytest.mark.parametrize(
+    ("source", "old_file_retained"),
+    [(FIRST, True), (FIRST_COMPLETE, False)],
+)
+def test_successful_incremental_and_complete_loads_remove_object_staging(
+    tmp_path: Path, source: str, old_file_retained: bool
+) -> None:
+    runtime = _install_files_runtime(tmp_path, {"Raw__First": source})
+    destination = tmp_path / "lake" / "Files" / "T0" / "Raw" / "First"
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "old.csv").write_text("old", encoding="utf-8")
+
+    load_target_runtime(runtime, execute=True)
+
+    assert (destination / "first.csv").is_file()
+    assert (destination / "old.csv").exists() is old_file_retained
+    assert not destination.with_name("First_Staging").exists()
+    assert not (tmp_path / "lake" / "Files" / "_weaver" / "staging").exists()
 
 
 def test_names_live_in_json_not_filenames_and_share_workflow_id(tmp_path: Path) -> None:
@@ -194,6 +221,10 @@ def test_failed_step_is_logged_and_earlier_logs_remain(tmp_path: Path) -> None:
         "updated": 0,
         "deleted": 0,
     }
+    staging = tmp_path / "lake" / "Files" / "T0" / "Raw" / "Second_Staging"
+    assert (staging / "partial.csv").read_text() == "partial"
+    assert not (tmp_path / "lake" / "Files" / "T0" / "Raw" / "First_Staging").exists()
+    assert not (tmp_path / "lake" / "Files" / "_weaver" / "staging").exists()
 
 
 def test_load_report_includes_workflow_id_and_log_dir(tmp_path: Path) -> None:

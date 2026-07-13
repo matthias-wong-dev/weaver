@@ -54,7 +54,7 @@ class Folder(WeaverObject):
         raise NotImplementedError("Folder objects must implement read()")
 
     def staging_folder(self):
-        """Return a fresh Weaver-managed staging folder for this read."""
+        """Return this read's empty object-local Weaver staging folder."""
 
         return self.context.staging_folder()
 

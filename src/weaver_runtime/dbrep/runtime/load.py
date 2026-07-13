@@ -105,11 +105,10 @@ def execute_load_plan(
 
     _ensure_on_path(runtime_root)
 
-    # One workflow per invocation: a durable log directory and an ephemeral
-    # staging root, both under the lakehouse the runtime is installed in.
+    # One workflow per invocation with a durable log directory. Folder staging
+    # is object-local and derived from each physical destination.
     workflow_id = create_workflow_id()
     log_dir = create_workflow_log_dir(lakehouse_root, workflow_id)
-    staging_root = lakehouse_root / "Files" / "_weaver" / "staging" / workflow_id
 
     own_spark = False
     if any(step["kind"] == "Table" for step in steps) and spark is None:
@@ -135,7 +134,6 @@ def execute_load_plan(
                     spark,
                     workflow_id,
                     log_dir,
-                    staging_root,
                 )
             )
     finally:
@@ -165,7 +163,6 @@ def _run_step(
     spark,
     workflow_id,
     log_dir,
-    staging_root,
 ) -> StepLog:
     object_id = step["object"]
     kind = step["kind"]
@@ -190,7 +187,7 @@ def _run_step(
             _execute_folder_step(
                 log, source_object, object_id, materialisation, repo,
                 lakehouse_root, runtime_root, spark,
-                workflow_id, log_dir, staging_root, loaded,
+                workflow_id, log_dir, loaded,
             )
             log.status = "success"
         elif kind == "Table":
@@ -234,12 +231,12 @@ def _execute_folder_step(
     spark,
     workflow_id,
     log_dir,
-    staging_root,
     loaded,
 ) -> None:
     """Run ``Folder.read()``, validate its result, and reconcile it into place."""
 
     destination = lakehouse_root / materialisation
+    staging_path = destination.with_name(f"{destination.name}_Staging")
     context = LoadContext(
         runtime_root=runtime_root,
         lakehouse_root=lakehouse_root,
@@ -252,26 +249,25 @@ def _execute_folder_step(
         metadata=source_object.metadata,
         workflow_id=workflow_id,
         log_dir=log_dir,
-        staging_root=staging_root,
+        staging_path=staging_path,
     )
-    try:
-        result = _instantiate(source_object, context).read()
-        upsert_path, delete_names = validate_folder_result(
-            result,
-            issued=context.issued_staging(),
-            destination=destination,
-            file_keys=source_object.metadata.file_keys,
-            is_incremental=source_object.metadata.is_incremental,
-        )
-        counts = apply_folder_result(
-            upsert_path,
-            delete_names,
-            destination,
-            file_keys=source_object.metadata.file_keys,
-            is_incremental=source_object.metadata.is_incremental,
-        )
-    finally:
-        context.cleanup_staging()
+    context.prepare_staging()
+    result = _instantiate(source_object, context).read()
+    upsert_path, delete_names = validate_folder_result(
+        result,
+        issued=context.issued_staging(),
+        destination=destination,
+        file_keys=source_object.metadata.file_keys,
+        is_incremental=source_object.metadata.is_incremental,
+    )
+    counts = apply_folder_result(
+        upsert_path,
+        delete_names,
+        destination,
+        file_keys=source_object.metadata.file_keys,
+        is_incremental=source_object.metadata.is_incremental,
+    )
+    context.cleanup_staging()
 
     loaded[object_id] = destination
     log.crud = counts

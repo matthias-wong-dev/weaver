@@ -4,7 +4,8 @@ A Folder object produces files by writing them into a Weaver-issued *staging*
 directory and returning the standard pair ``(staging_folder, delete)``:
 everything under the staging folder is upserted, the explicit relative paths are
 deleted. Weaver owns the destination — it validates the result, reconciles the staged files against the
-destination, counts file-level CRUD, and cleans the staging folder.
+destination and counts file-level CRUD. The orchestrator removes staging only
+after the complete Folder step succeeds.
 
 Incremental reconciliation scans the staged folder and exact explicit-delete
 paths. Complete reconciliation inventories only destination leaf files that
@@ -35,10 +36,10 @@ class StagingFolder:
     """A Weaver-issued staging directory with context-manager lifecycle.
 
     The directory is created up front and exposed as :attr:`path`. Used as a
-    context manager it is removed on an *exceptional* exit and preserved on a
-    normal exit, so object code may return the pair either inside or after the
-    ``with`` block with identical behaviour. Weaver consumes the folder once (via
-    :func:`validate_folder_result`) and removes it after reconciliation.
+    context manager it is always preserved, so object code may return the pair
+    either inside or after the ``with`` block with identical behaviour. Weaver
+    consumes the folder once via :func:`validate_folder_result`. The orchestrator
+    removes it after success and retains it after failure for diagnosis.
     """
 
     def __init__(self, path: Path):
@@ -49,15 +50,67 @@ class StagingFolder:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if exc_type is not None:
-            shutil.rmtree(self.path, ignore_errors=True)
         return False
 
 
-def new_staging_folder(staging_root: Path) -> StagingFolder:
-    """Create a unique empty staging directory beneath ``staging_root``."""
+def validate_staging_path_pair(
+    lakehouse_root: Path, destination: Path, staging_path: Path
+) -> tuple[Path, Path, Path]:
+    """Validate the exact object-local destination/staging relationship."""
 
-    path = Path(staging_root) / uuid.uuid4().hex
+    lakehouse = Path(lakehouse_root).resolve()
+    destination = Path(destination).resolve()
+    staging = Path(staging_path).resolve()
+
+    try:
+        destination_relative = destination.relative_to(lakehouse)
+        staging_relative = staging.relative_to(lakehouse)
+    except ValueError as exc:
+        raise LoadError(
+            "Folder staging and destination must remain within the lakehouse"
+        ) from exc
+
+    if destination == staging:
+        raise LoadError("Folder staging path must not equal its destination")
+    if staging.parent != destination.parent:
+        raise LoadError("Folder staging must be a sibling of its destination")
+    expected_name = f"{destination.name}_Staging"
+    if staging.name != expected_name:
+        raise LoadError(f"Folder staging must be named {expected_name}")
+
+    destination_parts = destination_relative.parts
+    if len(destination_parts) < 4 or destination_parts[0] != "Files":
+        raise LoadError(
+            "Folder destination must be an object path beneath Files/database/schema"
+        )
+    if len(staging_relative.parts) >= 2 and staging_relative.parts[:2] == (
+        "Files",
+        "_weaver",
+    ):
+        raise LoadError("Folder staging must not be created inside Files/_weaver")
+
+    protected = {
+        lakehouse,
+        lakehouse / "Files",
+        lakehouse / "Files" / destination_parts[1],
+        lakehouse / "Files" / destination_parts[1] / destination_parts[2],
+    }
+    if staging in protected or destination in protected:
+        raise LoadError("Folder staging path must not be a lakehouse boundary directory")
+
+    return lakehouse, destination, staging
+
+
+def new_staging_folder(
+    staging_path: Path, *, destination: Path, lakehouse_root: Path
+) -> StagingFolder:
+    """Reset and create the exact object-local staging directory."""
+
+    _lakehouse, _destination, path = validate_staging_path_pair(
+        lakehouse_root, destination, staging_path
+    )
+    if path.exists():
+        shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=False)
     return StagingFolder(path)
 
@@ -180,60 +233,57 @@ def apply_folder_result(
 ) -> CrudCounts:
     """Reconcile validated staged files into ``destination`` and count file CRUD.
 
-    Applies staged creates and updates, then explicit or automatic deletes, then
-    removes the staging folder. Automatic deletion inventories only managed
-    destination files. An identical staged file is counted as ``read`` but not
-    created/updated.
+    Applies staged creates and updates, then explicit or automatic deletes.
+    Automatic deletion inventories only managed destination files. An identical
+    staged file is counted as ``read`` but not created/updated. The orchestrator
+    owns staging cleanup.
     """
 
     destination = Path(destination)
     upsert_path = Path(upsert_path)
-    try:
-        staged = managed_relative_files(upsert_path, file_keys)
+    staged = managed_relative_files(upsert_path, file_keys)
 
-        proposed: list[tuple[str, str]] = []
-        for relative in staged:
-            source = upsert_path / relative
-            target = destination / relative
-            if not target.exists():
-                proposed.append((relative, "created"))
-            elif not _files_identical(source, target):
-                proposed.append((relative, "updated"))
-            else:
-                proposed.append((relative, "read"))
+    proposed: list[tuple[str, str]] = []
+    for relative in staged:
+        source = upsert_path / relative
+        target = destination / relative
+        if not target.exists():
+            proposed.append((relative, "created"))
+        elif not _files_identical(source, target):
+            proposed.append((relative, "updated"))
+        else:
+            proposed.append((relative, "read"))
 
-        created = updated = 0
-        for relative, action in proposed:
-            if action == "created":
-                _safe_replace(upsert_path / relative, destination / relative)
-                created += 1
-            elif action == "updated":
-                _safe_replace(upsert_path / relative, destination / relative)
-                updated += 1
+    created = updated = 0
+    for relative, action in proposed:
+        if action == "created":
+            _safe_replace(upsert_path / relative, destination / relative)
+            created += 1
+        elif action == "updated":
+            _safe_replace(upsert_path / relative, destination / relative)
+            updated += 1
 
-        delete_paths = set(delete)
-        if not is_incremental:
-            existing_managed = set(managed_relative_files(destination, file_keys))
-            delete_paths.update(existing_managed - set(staged))
+    delete_paths = set(delete)
+    if not is_incremental:
+        existing_managed = set(managed_relative_files(destination, file_keys))
+        delete_paths.update(existing_managed - set(staged))
 
-        deleted = 0
-        for relative in sorted(delete_paths):
-            if Path(relative).name in RESERVED_NAMES:
-                continue
-            target = destination / relative
-            if target.is_file():
-                target.unlink()
-                deleted += 1
+    deleted = 0
+    for relative in sorted(delete_paths):
+        if Path(relative).name in RESERVED_NAMES:
+            continue
+        target = destination / relative
+        if target.is_file():
+            target.unlink()
+            deleted += 1
 
-        return CrudCounts(
-            unit=FILES,
-            read=len(staged),
-            created=created,
-            updated=updated,
-            deleted=deleted,
-        )
-    finally:
-        shutil.rmtree(upsert_path, ignore_errors=True)
+    return CrudCounts(
+        unit=FILES,
+        read=len(staged),
+        created=created,
+        updated=updated,
+        deleted=deleted,
+    )
 
 
 def staged_relative_files(upsert_path: Path) -> list[str]:

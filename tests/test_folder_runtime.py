@@ -14,6 +14,7 @@ from weaver_runtime.dbrep.runtime.folders import (
     managed_relative_files,
     new_staging_folder,
     staged_relative_files,
+    validate_staging_path_pair,
     validate_folder_result as _validate_folder_result,
 )
 
@@ -47,20 +48,24 @@ def apply_folder_result(
     )
 
 
-def _context(staging_root: Path) -> LoadContext:
+def _context(tmp_path: Path) -> LoadContext:
+    lakehouse = tmp_path / "lake"
+    destination = lakehouse / "Files" / "T0" / "Raw" / "Drop"
     return LoadContext(
-        runtime_root=Path("/runtime"),
-        lakehouse_root=Path("/lake"),
+        runtime_root=lakehouse / "Files" / "_weaver" / "runtime",
+        lakehouse_root=lakehouse,
         object_id="T0.Raw.Drop",
         kind="Folder",
         materialisation="Files/T0/Raw/Drop",
         repo=Repo(),
-        staging_root=staging_root,
+        object_path=destination,
+        staging_path=destination.with_name("Drop_Staging"),
     )
 
 
-def _stage(staging_root: Path, files: dict[str, str]) -> StagingFolder:
-    staging = new_staging_folder(staging_root)
+def _stage(staging_path: Path, files: dict[str, str]) -> StagingFolder:
+    staging_path.mkdir(parents=True, exist_ok=False)
+    staging = StagingFolder(staging_path)
     for relative, content in files.items():
         path = staging.path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,18 +94,20 @@ def _validate(
 
 
 def test_normal_context_exit_preserves_staging(tmp_path: Path) -> None:
-    with new_staging_folder(tmp_path / "staging") as staging:
+    with _stage(tmp_path / "staging", {}) as staging:
         (staging.path / "a.csv").write_text("x", encoding="utf-8")
     assert staging.path.is_dir()  # preserved for Weaver to consume
 
 
-def test_exceptional_context_exit_cleans_staging(tmp_path: Path) -> None:
+def test_exceptional_context_exit_preserves_staging(tmp_path: Path) -> None:
     captured: dict[str, Path] = {}
     with pytest.raises(RuntimeError):
-        with new_staging_folder(tmp_path / "staging") as staging:
+        with _stage(tmp_path / "staging", {}) as staging:
             captured["path"] = staging.path
+            (staging.path / "a.csv").write_text("partial", encoding="utf-8")
             raise RuntimeError("boom")
-    assert not captured["path"].exists()
+    assert captured["path"].is_dir()
+    assert (captured["path"] / "a.csv").is_file()
 
 
 def test_return_inside_and_outside_with_are_equivalent(tmp_path: Path) -> None:
@@ -110,7 +117,7 @@ def test_return_inside_and_outside_with_are_equivalent(tmp_path: Path) -> None:
     counts_outside = apply_folder_result(up1, del1, tmp_path / "d1")
 
     # Return-inside-with: identical because normal exit also preserves.
-    with new_staging_folder(tmp_path / "s2") as inside:
+    with _stage(tmp_path / "s2", {}) as inside:
         (inside.path / "a.csv").write_text("one", encoding="utf-8")
         pair = (inside, ())
     up2, del2 = validate_folder_result(pair, issued=[inside], destination=tmp_path / "d2")
@@ -120,13 +127,94 @@ def test_return_inside_and_outside_with_are_equivalent(tmp_path: Path) -> None:
     assert (counts_inside.read, counts_inside.created) == (1, 1)
 
 
-def test_context_cleanup_staging_removes_issued_dirs(tmp_path: Path) -> None:
-    context = _context(tmp_path / "staging")
+def test_context_cleanup_staging_removes_issued_path(tmp_path: Path) -> None:
+    context = _context(tmp_path)
     first = context.staging_folder()
-    second = context.staging_folder()
-    assert first.path.is_dir() and second.path.is_dir()
+    assert first.path == tmp_path / "lake" / "Files" / "T0" / "Raw" / "Drop_Staging"
+    assert first.path.is_dir()
     context.cleanup_staging()
-    assert not first.path.exists() and not second.path.exists()
+    assert not first.path.exists()
+
+
+def test_second_staging_request_fails_without_resetting_first(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    first = context.staging_folder()
+    (first.path / "keep.csv").write_text("keep", encoding="utf-8")
+    with pytest.raises(LoadError, match="already been created"):
+        context.staging_folder()
+    assert (first.path / "keep.csv").read_text() == "keep"
+
+
+def test_new_attempt_resets_stale_object_local_staging(tmp_path: Path) -> None:
+    first_context = _context(tmp_path)
+    stale = first_context.prepare_staging()
+    (stale.path / "stale.csv").write_text("stale", encoding="utf-8")
+
+    retry_context = _context(tmp_path)
+    fresh = retry_context.prepare_staging()
+    assert fresh.path == stale.path
+    assert list(fresh.path.iterdir()) == []
+
+
+def test_cleanup_failure_is_surfaced_after_reconciliation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    context = _context(tmp_path)
+    staging = context.staging_folder()
+
+    def fail_cleanup(_path):
+        raise OSError("cleanup blocked")
+
+    monkeypatch.setattr("weaver_runtime.dbrep.runtime.context.shutil.rmtree", fail_cleanup)
+    with pytest.raises(LoadError, match="reconciled successfully.*cleanup failed"):
+        context.cleanup_staging()
+    assert staging.path.exists()
+
+
+@pytest.mark.parametrize(
+    ("destination_parts", "staging_parts", "message"),
+    [
+        (("Files", "T0", "Raw", "Drop"), ("Files", "T0", "Raw", "Drop"), "must not equal"),
+        (
+            ("Files", "T0", "Raw", "Drop"),
+            ("Files", "T0", "Other", "Drop_Staging"),
+            "sibling",
+        ),
+        (
+            ("Files", "T0", "Raw", "Drop"),
+            ("..", "Drop_Staging"),
+            "within the lakehouse",
+        ),
+        (
+            ("Files", "_weaver", "runtime", "Drop"),
+            ("Files", "_weaver", "runtime", "Drop_Staging"),
+            "Files/_weaver",
+        ),
+        (("Files", "T0"), ("Files", "T0_Staging"), "object path"),
+    ],
+)
+def test_staging_path_safety_checks(
+    tmp_path: Path, destination_parts, staging_parts, message
+) -> None:
+    lakehouse = tmp_path / "lake"
+    destination = lakehouse.joinpath(*destination_parts)
+    staging = lakehouse.joinpath(*staging_parts)
+    with pytest.raises(LoadError, match=message):
+        validate_staging_path_pair(lakehouse, destination, staging)
+
+
+def test_stale_staging_symlink_cannot_escape_recursive_cleanup(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "do-not-delete.txt"
+    marker.write_text("safe", encoding="utf-8")
+    context.staging_path.parent.mkdir(parents=True)
+    context.staging_path.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LoadError, match="within the lakehouse"):
+        context.prepare_staging()
+    assert marker.read_text() == "safe"
 
 
 # --- Shared pair shape -----------------------------------------------------
@@ -168,6 +256,7 @@ def test_unissued_staging_folder_rejected(tmp_path: Path) -> None:
     other = _stage(tmp_path / "other", {"a.csv": "x"})
     with pytest.raises(LoadError, match="did not issue"):
         validate_folder_result((other, ()), issued=[issued])
+    assert (issued.path / "a.csv").is_file()
 
 
 def test_already_consumed_staging_folder_rejected(tmp_path: Path) -> None:
@@ -190,6 +279,7 @@ def test_traversal_delete_rejected(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
     with pytest.raises(LoadError):
         _validate(staging, delete=["../secret.csv"])
+    assert (staging.path / "a.csv").is_file()
 
 
 def test_glob_delete_rejected(tmp_path: Path) -> None:
@@ -234,6 +324,7 @@ def test_staged_files_must_all_match_file_keys(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x", "notes.txt": "no"})
     with pytest.raises(LoadError, match=r"staged files do not match File key.*notes.txt"):
         _validate(staging, file_keys=("**/*.csv",))
+    assert (staging.path / "notes.txt").is_file()
 
 
 def test_multiple_and_overlapping_file_keys_match_nested_files_once(tmp_path: Path) -> None:
@@ -262,6 +353,7 @@ def test_non_incremental_rejects_explicit_deletes(tmp_path: Path) -> None:
             file_keys=("**/*.csv",),
             is_incremental=False,
         )
+    assert (staging.path / "a.csv").is_file()
 
 
 # --- Reconciliation --------------------------------------------------------
@@ -328,7 +420,7 @@ def test_nested_leaf_files_count_individually(tmp_path: Path) -> None:
 
 
 def test_empty_directories_do_not_count(tmp_path: Path) -> None:
-    staging = new_staging_folder(tmp_path / "staging")
+    staging = _stage(tmp_path / "staging", {})
     (staging.path / "empty").mkdir()
     (staging.path / "a.csv").write_text("x", encoding="utf-8")
     upsert_path, deletes = _validate(staging)
@@ -336,21 +428,22 @@ def test_empty_directories_do_not_count(tmp_path: Path) -> None:
     assert counts.read == 1
 
 
-def test_staging_cleaned_after_success(tmp_path: Path) -> None:
+def test_reconciliation_does_not_clean_staging_after_success(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
     upsert_path, deletes = _validate(staging)
     apply_folder_result(upsert_path, deletes, tmp_path / "dest")
-    assert not staging.path.exists()
+    assert staging.path.exists()
 
 
-def test_staging_cleaned_after_reconciliation_failure(tmp_path: Path) -> None:
+def test_staging_preserved_after_reconciliation_failure(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
     upsert_path, deletes = _validate(staging)
     destination = tmp_path / "dest_is_a_file"
     destination.write_text("blocking", encoding="utf-8")
     with pytest.raises(Exception):
         apply_folder_result(upsert_path, deletes, destination)
-    assert not staging.path.exists()
+    assert staging.path.exists()
+    assert (staging.path / "a.csv").is_file()
 
 
 def test_destination_unchanged_when_validation_fails(tmp_path: Path) -> None:
