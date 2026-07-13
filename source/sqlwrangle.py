@@ -121,6 +121,51 @@ def insert_ctas(sql_text: str, table_name: str) -> str:
     )
 
 
+def insert_ranked_ctas(
+    sql_text: str,
+    table_name: str,
+    *,
+    partition_columns: str,
+    rank_column: str,
+) -> str:
+    """Materialise the last result query with one persisted group rank.
+
+    The source query is captured once in an internal CTE, so unions and existing
+    CTEs retain their result semantics while ranking is evaluated only once.
+    """
+
+    query_span = _find_last_standalone_query(sql_text)
+    if query_span is None:
+        return sql_text
+
+    tokens = _flatten_with_offsets(sql_text)
+    select_start = tokens[query_span.select_index].start
+    statement_prefix = sql_text[query_span.start:select_start]
+    result_query = sql_text[select_start:query_span.end].strip().rstrip(";").rstrip()
+    source_cte = "[__weaver_rank_source]"
+
+    if statement_prefix.lstrip().upper().startswith("WITH"):
+        cte_prefix = statement_prefix.rstrip() + ",\n"
+    else:
+        cte_prefix = "with "
+        result_query = sql_text[query_span.start:query_span.end].strip().rstrip(";").rstrip()
+
+    ranked_sql = (
+        f"create table {table_name} as\n"
+        f"{cte_prefix}{source_cte} as (\n"
+        f"{result_query}\n"
+        ")\n"
+        "select\n"
+        "    s.*\n"
+        "  , row_number() over (\n"
+        f"        partition by {partition_columns}\n"
+        "        order by (select 0)\n"
+        f"    ) as {rank_column}\n"
+        f"from {source_cte} as s"
+    )
+    return f"{sql_text[:query_span.start]}{ranked_sql}{sql_text[query_span.end:]}"
+
+
 def insert_select_into(sql_text: str, table_name: str) -> str:
     """Insert ``INTO <table_name>`` into the last standalone SELECT query."""
 

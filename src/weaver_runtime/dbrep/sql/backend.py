@@ -378,7 +378,6 @@ def _drop_object_sql(row: dict) -> str:
             names.current_table,
             names.history_table,
             names.staging_table,
-            names.accepted_table,
             names.upsert_table,
             names.reject_table,
         ):

@@ -534,7 +534,8 @@ def test_generate_load_stored_procedure_sql_builds_pk_complete_loader():
     assert "create table [mart].[Customer_Staging] as" not in installer_prefix
     assert "set @weaver_proc_sql = N'create or alter procedure [_].[ETL mart.Customer]" in installer_sql
     assert "create table [mart].[Customer_Staging] as" in installer_sql
-    assert "create table [mart].[Customer_Accepted] as" in installer_sql
+    assert "Customer_Accepted" not in installer_sql
+    assert "with [__weaver_rank_source] as (" in installer_sql
     assert "create table [mart].[Customer_Upsert] as" in installer_sql
     assert "create table [mart].[Customer_Reject] as" in installer_sql
     assert "left join [mart].[Customer] as t on s.[CustomerCode] = t.[CustomerCode]" in installer_sql
@@ -545,7 +546,11 @@ def test_generate_load_stored_procedure_sql_builds_pk_complete_loader():
     assert "cast(''duplicate primary key'' as varchar(100))" in installer_sql
     assert "row_number() over (" in installer_sql
     assert "partition by s.[CustomerCode]" in installer_sql
-    assert "from [mart].[Customer_Accepted] as s" in installer_sql
+    assert "from [mart].[Customer_Staging] as s" in installer_sql
+    target_operations = installer_sql.split(
+        "insert into [mart].[Customer_Current]", maxsplit=1
+    )[1]
+    assert "__weaver_pk_row_number" not in target_operations
     assert "insert into [mart].[Customer_Current]" in installer_sql
     assert "insert into [mart].[Customer_History]" in installer_sql
     assert "update c" in installer_sql
@@ -579,20 +584,19 @@ begin
 
     if object_id(N'[mart].[Customer_Reject]', N'U') is not null drop table [mart].[Customer_Reject];
     if object_id(N'[mart].[Customer_Upsert]', N'U') is not null drop table [mart].[Customer_Upsert];
-    if object_id(N'[mart].[Customer_Accepted]', N'U') is not null drop table [mart].[Customer_Accepted];
     if object_id(N'[mart].[Customer_Staging]', N'U') is not null drop table [mart].[Customer_Staging];
 
     create table [mart].[Customer_Staging] as
-    select CustomerCode, CustomerName, Balance from dbo.SourceCustomers;
-
-    create table [mart].[Customer_Accepted] as
+    with [__weaver_rank_source] as (
+    select CustomerCode, CustomerName, Balance from dbo.SourceCustomers
+    )
     select
         s.*
       , row_number() over (
             partition by s.[CustomerCode]
             order by (select 0)
         ) as [__weaver_pk_row_number]
-    from [mart].[Customer_Staging] as s;
+    from [__weaver_rank_source] as s;
 
     create table [mart].[Customer_Reject] as
     select
@@ -603,7 +607,7 @@ begin
             when nullif(trim(cast(s.[CustomerCode] as varchar(max))), '') is null then cast('null primary key' as varchar(100))
             when s.[__weaver_pk_row_number] > 1 then cast('duplicate primary key' as varchar(100))
         end as [Rejection reason]
-    from [mart].[Customer_Accepted] as s
+    from [mart].[Customer_Staging] as s
     where
         (
             nullif(trim(cast(s.[CustomerCode] as varchar(max))), '') is null
@@ -611,7 +615,7 @@ begin
         );
 
     delete s
-    from [mart].[Customer_Accepted] as s
+    from [mart].[Customer_Staging] as s
     where
         (
             nullif(trim(cast(s.[CustomerCode] as varchar(max))), '') is null
@@ -624,7 +628,7 @@ begin
       , s.[CustomerName]
       , s.[Balance]
       , case when t.[CustomerCode] is null then cast(1 as int) else cast(0 as int) end as [_Is new row]
-    from [mart].[Customer_Accepted] as s
+    from [mart].[Customer_Staging] as s
     left join [mart].[Customer] as t on s.[CustomerCode] = t.[CustomerCode]
     where
         (
@@ -717,17 +721,17 @@ begin
           , c.[Row update datetime]
           , @weaver_load_datetime as [Row delete datetime]
         from [mart].[Customer_Current] as c
-        where not exists (select 1 from [mart].[Customer_Accepted] as s where s.[CustomerCode] = c.[CustomerCode]);
+        where not exists (select 1 from [mart].[Customer_Staging] as s where s.[CustomerCode] = c.[CustomerCode]);
 
         delete c
         from [mart].[Customer_Current] as c
-        where not exists (select 1 from [mart].[Customer_Accepted] as s where s.[CustomerCode] = c.[CustomerCode]);
+        where not exists (select 1 from [mart].[Customer_Staging] as s where s.[CustomerCode] = c.[CustomerCode]);
     end try
     begin catch
         delete h
         from [mart].[Customer_History] as h
         where h.[Row delete datetime] = @weaver_load_datetime
-            and not exists (select 1 from [mart].[Customer_Accepted] as s where s.[CustomerCode] = h.[CustomerCode]);
+            and not exists (select 1 from [mart].[Customer_Staging] as s where s.[CustomerCode] = h.[CustomerCode]);
 
         throw;
     end catch;
@@ -739,7 +743,6 @@ begin
     begin
         if object_id(N'[mart].[Customer_Reject]', N'U') is not null drop table [mart].[Customer_Reject];
         if object_id(N'[mart].[Customer_Upsert]', N'U') is not null drop table [mart].[Customer_Upsert];
-        if object_id(N'[mart].[Customer_Accepted]', N'U') is not null drop table [mart].[Customer_Accepted];
         if object_id(N'[mart].[Customer_Staging]', N'U') is not null drop table [mart].[Customer_Staging];
     end;
 end;"""
@@ -756,7 +759,7 @@ def test_generate_load_stored_procedure_sql_rejects_null_primary_keys():
     assert "when nullif(trim(cast(s.[CustomerCode] as varchar(max))), '''') is null then cast(''null primary key'' as varchar(100))" in installer_sql
     assert (
         "delete s\n"
-        "    from [mart].[Customer_Accepted] as s\n"
+        "    from [mart].[Customer_Staging] as s\n"
         "    where\n"
         "        (\n"
         "            nullif(trim(cast(s.[CustomerCode] as varchar(max))), '''') is null"
@@ -774,7 +777,7 @@ def test_generate_load_stored_procedure_sql_rejects_duplicate_primary_keys():
     assert "as [__weaver_pk_row_number]" in installer_sql
     assert "when s.[__weaver_pk_row_number] > 1 then cast(''duplicate primary key'' as varchar(100))" in installer_sql
     assert "or s.[__weaver_pk_row_number] > 1" in installer_sql
-    assert "delete s\n    from [mart].[Customer_Accepted] as s" in installer_sql
+    assert "delete s\n    from [mart].[Customer_Staging] as s" in installer_sql
 
 
 def test_generate_incremental_loader_omits_missing_key_reconciliation():
@@ -785,9 +788,9 @@ def test_generate_incremental_loader_omits_missing_key_reconciliation():
         is_incremental=True,
     )
 
-    assert "create table [mart].[Customer_Accepted] as" in installer_sql
+    assert "Customer_Accepted" not in installer_sql
     assert "create table [mart].[Customer_Upsert] as" in installer_sql
-    assert "not exists (select 1 from [mart].[Customer_Accepted]" not in installer_sql
+    assert "not exists (select 1 from [mart].[Customer_Staging]" not in installer_sql
 
 
 def test_generate_load_stored_procedure_sql_keeps_artifacts_when_reject_is_not_empty():
@@ -805,7 +808,6 @@ def test_generate_load_stored_procedure_sql_keeps_artifacts_when_reject_is_not_e
         "    begin\n"
         "        if object_id(N''[mart].[Customer_Reject]'', N''U'') is not null drop table [mart].[Customer_Reject];\n"
         "        if object_id(N''[mart].[Customer_Upsert]'', N''U'') is not null drop table [mart].[Customer_Upsert];\n"
-        "        if object_id(N''[mart].[Customer_Accepted]'', N''U'') is not null drop table [mart].[Customer_Accepted];\n"
         "        if object_id(N''[mart].[Customer_Staging]'', N''U'') is not null drop table [mart].[Customer_Staging];\n"
         "    end;"
     ) in installer_sql
@@ -849,7 +851,6 @@ begin
 
     if object_id(N'[mart].[Product_Reject]', N'U') is not null drop table [mart].[Product_Reject];
     if object_id(N'[mart].[Product_Upsert]', N'U') is not null drop table [mart].[Product_Upsert];
-    if object_id(N'[mart].[Product_Accepted]', N'U') is not null drop table [mart].[Product_Accepted];
     if object_id(N'[mart].[Product_Staging]', N'U') is not null drop table [mart].[Product_Staging];
 
     create table [mart].[Product_Staging] as
@@ -874,7 +875,6 @@ begin
 
     if object_id(N'[mart].[Product_Reject]', N'U') is not null drop table [mart].[Product_Reject];
     if object_id(N'[mart].[Product_Upsert]', N'U') is not null drop table [mart].[Product_Upsert];
-    if object_id(N'[mart].[Product_Accepted]', N'U') is not null drop table [mart].[Product_Accepted];
     if object_id(N'[mart].[Product_Staging]', N'U') is not null drop table [mart].[Product_Staging];
 end;"""
 
@@ -901,7 +901,7 @@ def test_generate_load_stored_procedure_sql_quotes_names_and_composite_pk():
         "                ) then cast(''null primary key'' as varchar(100))"
     ) in installer_sql
     assert (
-        "from [audit].[Order Line_Accepted] as s where "
+        "from [audit].[Order Line_Staging] as s where "
         "s.[Order Id] = c.[Order Id]\n        and s.[Line No] = c.[Line No]"
     ) in installer_sql
     assert "N'order id'" in installer_sql

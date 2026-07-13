@@ -10,10 +10,28 @@ from source.sqlwrangle import (
     format_sql_dependency,
     get_sql_template,
     insert_ctas,
+    insert_ranked_ctas,
     insert_select_into,
     insert_where_one_eq_zero,
     render_sql_template,
 )
+
+
+def test_insert_ranked_ctas_ranks_the_complete_source_result_once():
+    transformed = insert_ranked_ctas(
+        "with a as (select id, value from dbo.A)\n"
+        "select id, value from a\nunion all\nselect id, value from dbo.B",
+        "[stage].[Record_Staging]",
+        partition_columns="s.[id]",
+        rank_column="[__weaver_pk_row_number]",
+    )
+
+    assert transformed.count("row_number() over") == 1
+    assert "with a as (select id, value from dbo.A)," in transformed
+    assert "[__weaver_rank_source] as (" in transformed
+    assert "union all\nselect id, value from dbo.B" in transformed
+    assert "partition by s.[id]" in transformed
+    assert "as [__weaver_pk_row_number]" in transformed
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "sql"

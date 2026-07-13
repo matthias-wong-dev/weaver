@@ -1,12 +1,3 @@
-create table $accepted_table as
-select
-    s.*
-  , row_number() over (
-        partition by $duplicate_partition_columns
-        order by (select 0)
-    ) as [__weaver_pk_row_number]
-from $staging_table as s;
-
 create table $reject_table as
 select
     __STAGING_SELECT_COLUMNS__
@@ -14,7 +5,7 @@ select
         when $staging_blank_case_predicate then cast('null primary key' as varchar(100))
         when s.[__weaver_pk_row_number] > 1 then cast('duplicate primary key' as varchar(100))
     end as [Rejection reason]
-from $accepted_table as s
+from $staging_table as s
 where
     (
         $staging_blank_where_predicate
@@ -22,7 +13,7 @@ where
     );
 
 delete s
-from $accepted_table as s
+from $staging_table as s
 where
     (
         $staging_blank_where_predicate
@@ -33,7 +24,7 @@ create table $upsert_table as
 select
     __STAGING_SELECT_COLUMNS__
   , case when $target_missing_predicate then cast(1 as int) else cast(0 as int) end as [_Is new row]
-from $accepted_table as s
+from $staging_table as s
 left join $view_name as t on $staging_target_join
 where
     (

@@ -12,7 +12,7 @@ from .ddl import (
     _quote_identifier_part,
     _sql_string_literal,
 )
-from .wrangle import insert_ctas, render_sql_template
+from .wrangle import insert_ctas, insert_ranked_ctas, render_sql_template
 
 
 def generate_load_stored_procedure_sql(
@@ -27,9 +27,16 @@ def generate_load_stored_procedure_sql(
     table_names = _derive_table_names(target_table_name)
     primary_key_columns = _normalise_column_list(primary_key_columns)
     source_sql = _normalise_procedure_source_sql(sql_text)
-    runtime_staging_sql = _ensure_statement_terminated(
-        insert_ctas(source_sql, table_names.staging_table)
-    )
+    if primary_key_columns:
+        staging_sql = insert_ranked_ctas(
+            source_sql,
+            table_names.staging_table,
+            partition_columns=_pk_partition_columns("s", primary_key_columns),
+            rank_column="[__weaver_pk_row_number]",
+        )
+    else:
+        staging_sql = insert_ctas(source_sql, table_names.staging_table)
+    runtime_staging_sql = _ensure_statement_terminated(staging_sql)
 
     procedure_template = _render_static_load_procedure_template(
         table_names=table_names,
@@ -85,7 +92,6 @@ def _render_start_artifact_cleanup(table_names) -> str:
     return (
         f"if object_id({_sql_string_literal(table_names.reject_table)}, N'U') is not null drop table {table_names.reject_table};\n"
         f"if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
-        f"if object_id({_sql_string_literal(table_names.accepted_table)}, N'U') is not null drop table {table_names.accepted_table};\n"
         f"if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};"
     )
 
@@ -194,11 +200,11 @@ def _render_static_primary_key_load_body(
     duplicate_partition_columns = _pk_partition_columns("s", primary_key_columns)
     target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} is null"
     delete_missing_filter = (
-        f"not exists (select 1 from {table_names.accepted_table} as s "
+        f"not exists (select 1 from {table_names.staging_table} as s "
         f"where {staging_current_join})"
     )
     delete_history_unwind_filter = (
-        f"not exists (select 1 from {table_names.accepted_table} as s "
+        f"not exists (select 1 from {table_names.staging_table} as s "
         f"where {staging_history_join})"
     )
 
@@ -206,7 +212,6 @@ def _render_static_primary_key_load_body(
         "etl/primary_key_body",
         upsert_table=table_names.upsert_table,
         staging_table=table_names.staging_table,
-        accepted_table=table_names.accepted_table,
         reject_table=table_names.reject_table,
         current_table=table_names.current_table,
         history_table=table_names.history_table,

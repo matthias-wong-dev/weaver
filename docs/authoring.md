@@ -203,5 +203,7 @@ explicitly deleted is upserted (the delete is counted unmatched). Row CRUD count
 For keyed tables, Weaver cleanses staging before comparing it with the target.
 Rows with blank primary keys are rejected. For each duplicated non-blank key, one
 unspecified representative is accepted and only the surplus rows are rejected.
-Accepted staging drives inserts, updates, and complete missing-key reconciliation;
-rejects do not prevent valid rows from loading or suppress reconciliation.
+SQL staging is then cleansed in place, while Delta uses the equivalent accepted
+population. That population drives inserts, updates, and complete missing-key
+reconciliation; rejects do not prevent valid rows from loading or suppress
+reconciliation.
