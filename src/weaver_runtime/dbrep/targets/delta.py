@@ -1,7 +1,7 @@
 """Delta target adapter: plan Delta table installs for Table objects.
 
 Plan-only at build time. Real Delta initialisation and load happen through the
-Spark load policy (kept out of core so PySpark stays an optional dependency).
+Spark runtime (kept out of core imports so PySpark stays an optional dependency).
 """
 
 from __future__ import annotations

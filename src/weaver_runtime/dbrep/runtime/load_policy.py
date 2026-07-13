@@ -1,9 +1,8 @@
 """Governed table load policy (pure, no PySpark).
 
 This is the source of truth for Weaver's governed write behaviour. It operates
-on rows as plain dicts so it is fully unit-testable without Spark. The Spark
-runtime projects and casts incoming frames to the declared schema before rows
-enter this policy.
+on rows as plain dicts so it is fully unit-testable without Spark. The physical
+Delta executor validates Spark frames against the same prepared policy.
 
 Behaviour summary:
 
@@ -61,6 +60,60 @@ class LoadOutcome:
         }
 
 
+@dataclass(frozen=True)
+class TableLoadPlan:
+    """Validated table policy shared by reference and physical executors."""
+
+    primary_key: tuple[str, ...]
+    mode: str
+    reconciliation_ran: bool
+    explicit_delete_keys: tuple[tuple, ...]
+
+
+def prepare_table_load(
+    *,
+    primary_key: Sequence[str] = (),
+    schema: Sequence[tuple[str, str]] = (),
+    is_incremental: bool = False,
+    load_mode: str | None = None,
+    explicit_delete_keys: Sequence[Sequence] = (),
+    object_name: str = "",
+) -> TableLoadPlan:
+    """Validate write authority and return the effective physical load plan."""
+
+    primary_key = tuple(primary_key)
+    if isinstance(explicit_delete_keys, (str, bytes)):
+        raise LoadError("explicit delete keys must be a sequence of primary-key tuples")
+    explicit_provided = tuple(explicit_delete_keys or ())
+    _validate_delete_authority(
+        primary_key, is_incremental, explicit_provided, object_name
+    )
+
+    if schema:
+        declared = {column for column, _ in schema}
+        missing_pk = [column for column in primary_key if column not in declared]
+        if missing_pk:
+            raise LoadError(
+                "primary key columns are not part of the declared schema: "
+                + ", ".join(missing_pk)
+            )
+
+    mode = (load_mode or (UPSERT if primary_key else REPLACE)).lower()
+    reconciliation_ran = not is_incremental and mode == UPSERT and bool(primary_key)
+    explicit_keys: tuple[tuple, ...] = ()
+    if primary_key and is_incremental and explicit_provided:
+        explicit_keys = _normalise_delete_keys(
+            explicit_provided, primary_key, object_name
+        )
+
+    return TableLoadPlan(
+        primary_key=primary_key,
+        mode=mode,
+        reconciliation_ran=reconciliation_ran,
+        explicit_delete_keys=explicit_keys,
+    )
+
+
 def run_table_load(
     existing_rows: Sequence[dict],
     incoming_rows: Sequence[dict],
@@ -82,13 +135,17 @@ def run_table_load(
     any write is planned.
     """
 
-    primary_key = tuple(primary_key)
     input_count = len(incoming_rows)
 
-    if isinstance(explicit_delete_keys, (str, bytes)):
-        raise LoadError("explicit delete keys must be a sequence of primary-key tuples")
-    explicit_provided = tuple(explicit_delete_keys or ())
-    _validate_delete_authority(primary_key, is_incremental, explicit_provided, object_name)
+    plan = prepare_table_load(
+        primary_key=primary_key,
+        schema=schema,
+        is_incremental=is_incremental,
+        load_mode=load_mode,
+        explicit_delete_keys=explicit_delete_keys,
+        object_name=object_name,
+    )
+    primary_key = plan.primary_key
 
     projected, columns = _apply_schema(
         incoming_rows, tuple(schema), primary_key, strict_extra_columns
@@ -100,16 +157,13 @@ def run_table_load(
         accepted, pk_rejects = list(projected), []
 
     rejected = pk_rejects
-    mode = (load_mode or (UPSERT if primary_key else REPLACE)).lower()
-    is_complete_result = not is_incremental
-    reconciliation_ran = is_complete_result and mode == UPSERT and bool(primary_key)
-
-    explicit_keys: tuple[tuple, ...] = ()
-    if primary_key and is_incremental and explicit_provided:
-        explicit_keys = _normalise_delete_keys(explicit_provided, primary_key, object_name)
-
     final, inserted, updated, deleted, explicit_detail = _plan_write(
-        list(existing_rows), accepted, primary_key, mode, reconciliation_ran, explicit_keys
+        list(existing_rows),
+        accepted,
+        primary_key,
+        plan.mode,
+        plan.reconciliation_ran,
+        plan.explicit_delete_keys,
     )
     explicit_read, explicit_matched, explicit_unmatched = explicit_detail
 
@@ -123,7 +177,7 @@ def run_table_load(
         inserted=inserted,
         updated=updated,
         deleted=deleted,
-        reconciliation_ran=reconciliation_ran,
+        reconciliation_ran=plan.reconciliation_ran,
         columns=columns,
         explicit_delete_keys_read=explicit_read,
         explicit_delete_keys_matched=explicit_matched,

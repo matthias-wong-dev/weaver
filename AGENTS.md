@@ -83,8 +83,9 @@ Rules that must hold: config uses one `env.yml` (hosts only) referenced by
 static (`self.repo["..."]` / SQL `from`/`join`); two-part refs are
 intra-database, three-part are managed cross-database only when supplied, else
 external; discovery ignores every `_`-prefixed folder/file. Keep PySpark out of
-core — it is a lazy import confined to `runtime/load.py` and `runtime/load_policy`
-is a pure, PySpark-free reference for load behaviour. `sqlparse`, `pyodbc`, and
+core imports — it is loaded lazily by the physical runtime, while
+`runtime/load_policy.py` is a pure, PySpark-free reference for load behaviour.
+`sqlparse`, `pyodbc`, and
 `azure-identity` are also lazy so the core (and the installed Fabric runtime)
 import them only when SQL discovery / SQL connections actually run.
 
