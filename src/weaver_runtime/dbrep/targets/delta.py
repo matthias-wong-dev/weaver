@@ -31,7 +31,9 @@ class DeltaTarget(TargetAdapter):
         if metadata.has_primary_key:
             operations.append("record primary key")
         operations.append(
-            "record auto-delete policy" if metadata.auto_delete else "record keep-missing policy"
+            "record incremental policy"
+            if metadata.is_incremental
+            else "record complete-reconciliation policy"
         )
         if metadata.static:
             operations.append("record static flag")

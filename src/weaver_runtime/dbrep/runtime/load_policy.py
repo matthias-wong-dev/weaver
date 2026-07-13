@@ -9,12 +9,11 @@ Behaviour summary:
 
 * No primary key -> full replacement.
 * Blank primary key -> reject row.
-* Duplicate incoming primary key -> reject the duplicated rows.
+* Duplicate incoming primary key -> accept one unspecified row and reject surplus rows.
 * Missing declared schema column -> fail load.
 * Extra source column -> projected away (unless strict-extra-columns).
-* Primary key + not auto-delete -> upsert; missing rows remain.
-* Primary key + auto-delete -> upsert; delete missing rows, but only when the
-  incoming batch has no rejects.
+* Primary key + incremental -> upsert; missing rows remain.
+* Primary key + non-incremental -> upsert and delete missing rows.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ class LoadOutcome:
     inserted: int
     updated: int
     deleted: int
-    auto_delete_ran: bool
+    reconciliation_ran: bool
     columns: tuple[str, ...] = ()
     explicit_delete_keys_read: int = 0
     explicit_delete_keys_matched: int = 0
@@ -68,7 +67,7 @@ def run_table_load(
     *,
     primary_key: Sequence[str] = (),
     schema: Sequence[tuple[str, str]] = (),
-    auto_delete: bool = False,
+    is_incremental: bool = False,
     load_mode: str | None = None,
     strict_extra_columns: bool = False,
     explicit_delete_keys: Sequence[Sequence] = (),
@@ -78,8 +77,8 @@ def run_table_load(
 
     ``explicit_delete_keys`` are primary-key tuples (in declared key order) whose
     existing rows should be removed. Deletion has exactly one authority: a table
-    without a primary key cannot delete rows, and ``auto_delete`` and explicit
-    deletes cannot be combined. All authority and key validation happens before
+    without a primary key cannot delete rows, and complete reconciliation and
+    explicit deletes cannot be combined. All authority and key validation happens before
     any write is planned.
     """
 
@@ -89,7 +88,7 @@ def run_table_load(
     if isinstance(explicit_delete_keys, (str, bytes)):
         raise LoadError("explicit delete keys must be a sequence of primary-key tuples")
     explicit_provided = tuple(explicit_delete_keys or ())
-    _validate_delete_authority(primary_key, auto_delete, explicit_provided, object_name)
+    _validate_delete_authority(primary_key, is_incremental, explicit_provided, object_name)
 
     projected, columns = _apply_schema(
         incoming_rows, tuple(schema), primary_key, strict_extra_columns
@@ -101,17 +100,16 @@ def run_table_load(
         accepted, pk_rejects = list(projected), []
 
     rejected = pk_rejects
-    has_rejects = bool(rejected)
-
     mode = (load_mode or (UPSERT if primary_key else REPLACE)).lower()
-    effective_auto_delete = auto_delete and not has_rejects and mode == UPSERT and bool(primary_key)
+    is_complete_result = not is_incremental
+    reconciliation_ran = is_complete_result and mode == UPSERT and bool(primary_key)
 
     explicit_keys: tuple[tuple, ...] = ()
-    if primary_key and not auto_delete and explicit_provided:
+    if primary_key and is_incremental and explicit_provided:
         explicit_keys = _normalise_delete_keys(explicit_provided, primary_key, object_name)
 
     final, inserted, updated, deleted, explicit_detail = _plan_write(
-        list(existing_rows), accepted, primary_key, mode, effective_auto_delete, explicit_keys
+        list(existing_rows), accepted, primary_key, mode, reconciliation_ran, explicit_keys
     )
     explicit_read, explicit_matched, explicit_unmatched = explicit_detail
 
@@ -125,7 +123,7 @@ def run_table_load(
         inserted=inserted,
         updated=updated,
         deleted=deleted,
-        auto_delete_ran=effective_auto_delete and deleted >= 0,
+        reconciliation_ran=reconciliation_ran,
         columns=columns,
         explicit_delete_keys_read=explicit_read,
         explicit_delete_keys_matched=explicit_matched,
@@ -133,7 +131,7 @@ def run_table_load(
     )
 
 
-def _validate_delete_authority(primary_key, auto_delete, explicit_provided, object_name) -> None:
+def _validate_delete_authority(primary_key, is_incremental, explicit_provided, object_name) -> None:
     """Enforce the single-deletion-authority rules before any write is planned."""
 
     label = f"Table {object_name}" if object_name else "Table"
@@ -143,15 +141,15 @@ def _validate_delete_authority(primary_key, auto_delete, explicit_provided, obje
                 f"{label} returned explicit deletions, but no primary key is declared. "
                 "Explicit row deletion requires a declared primary key."
             )
-        if auto_delete:
+        if is_incremental:
             raise LoadError(
-                f"{label} has Auto delete enabled, but no primary key is declared. "
-                "Automatic row deletion requires a declared primary key."
+                f"{label} is incremental, but no primary key is declared. "
+                "Incremental table loading requires a declared primary key."
             )
-    elif auto_delete and explicit_provided:
+    elif not is_incremental and explicit_provided:
         raise LoadError(
-            f"{label} has Auto delete enabled and also returned explicit deletions. "
-            "A table must use either automatic deletion or explicit deletion, not both."
+            f"{label} is non-incremental and also returned explicit deletions. "
+            "A table must use either complete reconciliation or explicit deletion, not both."
         )
 
 
@@ -230,21 +228,19 @@ def _validate_primary_key(rows, primary_key):
         else:
             non_blank.append(row)
 
-    counts: dict = {}
+    accepted: list[dict] = []
+    seen: set[tuple] = set()
     for row in non_blank:
         key = _key(row, primary_key)
-        counts[key] = counts.get(key, 0) + 1
-
-    accepted: list[dict] = []
-    for row in non_blank:
-        if counts[_key(row, primary_key)] > 1:
+        if key in seen:
             rejects.append(_reject(row, REASON_DUPLICATE_PK))
         else:
+            seen.add(key)
             accepted.append(row)
     return accepted, rejects
 
 
-def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete, explicit_keys):
+def _plan_write(existing, accepted, primary_key, mode, reconciliation_ran, explicit_keys):
     no_explicit = (0, 0, 0)
     if not primary_key:
         return list(accepted), len(accepted), 0, len(existing), no_explicit
@@ -263,7 +259,7 @@ def _plan_write(existing, accepted, primary_key, mode, effective_auto_delete, ex
     inserted = len(incoming_keys - existing_keys)
     updated = len(incoming_keys & existing_keys)
 
-    if effective_auto_delete:
+    if reconciliation_ran:
         deleted = len(existing_keys - incoming_keys)
         final = list(incoming_by_key.values())
         return final, inserted, updated, deleted, no_explicit

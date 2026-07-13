@@ -306,6 +306,7 @@ def _install_load_procedure(target, planned) -> None:
         planned.source.sql_body,
         planned.declared_as,
         primary_key_columns=list(planned.source.metadata.primary_key),
+        is_incremental=planned.source.metadata.is_incremental,
     )
     _run_sql_with_retry(target, sql)
 
@@ -377,6 +378,7 @@ def _drop_object_sql(row: dict) -> str:
             names.current_table,
             names.history_table,
             names.staging_table,
+            names.accepted_table,
             names.upsert_table,
             names.reject_table,
         ):

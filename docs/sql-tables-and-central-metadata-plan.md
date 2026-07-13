@@ -59,7 +59,7 @@ current at time of writing; re-grep if they've drifted.
 | File | Why |
 | --- | --- |
 | `AGENTS.md` | Repo rules: environment-neutral (no product/workspace/name defaults in `src/`), lazy imports keep PySpark/pyodbc/azure out of core, SQL style guide. Tests: `../.venv/bin/python -m pytest` from `weaver/` runs core only; `-m fabric` / `-m spark` opt in. |
-| `src/weaver_runtime/dbrep/ses/metadata.py` | The SES object metadata model. `ObjectMetadata`, `parse_object_metadata`, `_parse_bool`. This is where the new `Prohibit rebuild:` header is parsed. Note `FOLDER`/`TABLE`/`VIEW` kinds, `Static`, `Load mode`, `Auto delete`, `Primary key`, `Schema`. |
+| `src/weaver_runtime/dbrep/ses/metadata.py` | The SES object metadata model. `ObjectMetadata`, `parse_object_metadata`, `_parse_bool`. This is where the new `Prohibit rebuild:` header is parsed. Note `FOLDER`/`TABLE`/`VIEW` kinds, `Static`, `Load mode`, `Incremental`, `Primary key`, `Schema`. |
 | `src/weaver_runtime/dbrep/build/planner.py` | `plan_build` → `BuildPlan`. Discovers SES objects, classifies dependencies (intra/cross/external), topologically orders them, produces `PlannedObject`s bound to targets. This is the polymorphic front half of build — already target-agnostic. |
 | `src/weaver_runtime/dbrep/cli/commands.py` | `run_build` / `run_generate` / `run_load` / `run_wipe`. Shows how the three backends are dispatched today and where the metadata-Lakehouse parameter must be threaded in. |
 

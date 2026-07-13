@@ -29,7 +29,7 @@ def write_python_table(
     obj: str,
     *,
     primary_key: str | None = "record_id",
-    auto_delete: bool = False,
+    is_incremental: bool = False,
     static: bool = False,
     deps: tuple[str, ...] = (),
     schema_cols: tuple[tuple[str, str], ...] = (),
@@ -38,8 +38,8 @@ def write_python_table(
     meta = [f"Table ID: {schema}.{obj}", f"Description: {obj} table.", f"Lineage: Builds {obj}."]
     if primary_key:
         meta.append(f"Primary key: {primary_key}")
-    if auto_delete:
-        meta.append("Auto delete: true")
+    if is_incremental:
+        meta.append("Incremental: true")
     if static:
         meta.append("Static: true")
     if schema_cols:
@@ -75,7 +75,7 @@ def write_python_folder(
         f"Description: {obj} folder.",
         f"Lineage: Writes {obj}.",
         'File key: "**/*"',
-        "Auto delete: false",
+        "Incremental: true",
     ]
     dep_lines = "\n".join(f'            _{i} = self.repo["{ref}"]' for i, ref in enumerate(deps))
     if not dep_lines:

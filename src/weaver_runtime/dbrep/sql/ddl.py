@@ -35,6 +35,7 @@ class _TableNames:
     current_table: str
     history_table: str
     staging_table: str
+    accepted_table: str
     upsert_table: str
     reject_table: str
     load_procedure: str
@@ -398,6 +399,7 @@ def _derive_table_names(target_table_name: str) -> _TableNames:
         current_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Current')}",
         history_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_History')}",
         staging_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Staging')}",
+        accepted_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Accepted')}",
         upsert_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Upsert')}",
         reject_table=f"{quoted_schema}.{_quote_identifier_part(f'{unquoted_table_name}_Reject')}",
         load_procedure=f"[_].{_quote_identifier_part(f'ETL {schema_name}.{unquoted_table_name}')}",

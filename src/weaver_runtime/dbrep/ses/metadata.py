@@ -7,7 +7,7 @@ block, written as a small YAML mapping::
     Description: Normalised records.
     Lineage: Reads raw records and creates a typed table.
     Primary key: record_id
-    Auto delete: false
+    Incremental: true
 
 Declarations are two-part ``Schema.Object``; Weaver normalises the database from
 the containing representation. Exactly one of ``Folder ID`` / ``Table ID`` /
@@ -61,7 +61,7 @@ class ObjectMetadata:
     lineage: str
     primary_key: tuple[str, ...]
     file_keys: tuple[str, ...]
-    auto_delete: bool
+    is_incremental: bool
     static: bool
     load_mode: str | None
     schema: tuple[tuple[str, str], ...]
@@ -151,18 +151,24 @@ def parse_object_metadata(text: str) -> ObjectMetadata:
     file_keys = _parse_file_keys(
         loaded.get("File key"), kind=kind, declared="File key" in loaded
     )
-    auto_delete = _parse_auto_delete(
-        loaded.get("Auto delete"),
-        kind=kind,
-        has_primary_key=bool(primary_key),
+    if "Auto delete" in loaded:
+        raise MetadataError(
+            "Auto delete is no longer supported. Use Incremental with the inverse value:\n"
+            "Auto delete: false becomes Incremental: true.\n"
+            "Auto delete: true becomes Incremental: false."
+        )
+    is_incremental = _parse_is_incremental(
+        loaded.get("Incremental"), kind=kind, declared="Incremental" in loaded
     )
     static = _parse_bool(loaded.get("Static"), "Static")
     load_mode = _parse_load_mode(loaded.get("Load mode"))
     schema = _parse_schema(loaded.get("Schema"))
 
-    if kind == TABLE and auto_delete and not primary_key:
+    if kind == VIEW and "Incremental" in loaded:
+        raise MetadataError("Incremental is not supported for View objects")
+    if kind == TABLE and is_incremental and not primary_key:
         raise MetadataError(
-            "Auto delete requires a Primary key (no-PK auto-delete is invalid)"
+            "Incremental: true requires a Primary key"
         )
 
     return ObjectMetadata(
@@ -172,7 +178,7 @@ def parse_object_metadata(text: str) -> ObjectMetadata:
         lineage=lineage,
         primary_key=primary_key,
         file_keys=file_keys,
-        auto_delete=auto_delete,
+        is_incremental=is_incremental,
         static=static,
         load_mode=load_mode,
         schema=schema,
@@ -257,12 +263,12 @@ def _parse_bool(value: Any, key: str) -> bool:
     raise MetadataError(f"{key} must be a boolean (true/false)")
 
 
-def _parse_auto_delete(value: Any, *, kind: str, has_primary_key: bool) -> bool:
-    """Apply object-aware defaults while preserving explicit declarations."""
+def _parse_is_incremental(value: Any, *, kind: str, declared: bool) -> bool:
+    """Apply the table-complete/folder-incremental defaults."""
 
-    if value is None:
-        return kind == TABLE and has_primary_key
-    return _parse_bool(value, "Auto delete")
+    if not declared:
+        return kind == FOLDER
+    return _parse_bool(value, "Incremental")
 
 
 def _parse_load_mode(value: Any) -> str | None:

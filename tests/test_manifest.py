@@ -97,6 +97,8 @@ def test_dictionary_artifacts_record_metadata(tmp_path: Path) -> None:
     tables = {entry["id"]: entry for entry in table_dictionary["tables"]}
     assert tables["T1.Mart.Reference"]["static"] is True
     assert tables["T1.Stage.Record"]["load_mode"] == "upsert"
+    assert tables["T1.Stage.Record"]["is_incremental"] is False
+    assert all("auto_delete" not in entry for entry in tables.values())
 
     columns = [
         (entry["ordinal"], entry["column"], entry["type"])

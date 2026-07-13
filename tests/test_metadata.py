@@ -23,7 +23,7 @@ def test_parses_table_metadata() -> None:
             Description: Normalised records.
             Lineage: Reads raw records and creates a typed table.
             Primary key: record_id
-            Auto delete: false
+            Incremental: true
             """
         )
     )
@@ -32,7 +32,7 @@ def test_parses_table_metadata() -> None:
     assert meta.object_id.object == "Record"
     assert meta.qualified == "Stage.Record"
     assert meta.primary_key == ("record_id",)
-    assert meta.auto_delete is False
+    assert meta.is_incremental is True
     assert meta.effective_load_mode == UPSERT
 
 
@@ -44,29 +44,28 @@ def test_parses_folder_metadata_without_primary_key() -> None:
             Description: Raw file drop.
             Lineage: Writes raw CSV files into the landing folder.
             File key: "**/*.csv"
-            Auto delete: false
             """
         )
     )
     assert meta.kind == "Folder"
     assert meta.primary_key == ()
     assert meta.file_keys == ("**/*.csv",)
-    assert meta.auto_delete is False
+    assert meta.is_incremental is True
     assert meta.effective_load_mode == APPEND
 
 
-def test_folder_requires_file_key_and_defaults_auto_delete_false() -> None:
+def test_folder_requires_file_key_and_defaults_incremental_true() -> None:
     with pytest.raises(MetadataError, match="declare File key"):
         parse_object_metadata(
-            "Folder ID: Raw.Drop\nDescription: x\nLineage: y\nAuto delete: false\n"
+            "Folder ID: Raw.Drop\nDescription: x\nLineage: y\n"
         )
     meta = parse_object_metadata(
         'Folder ID: Raw.Drop\nDescription: x\nLineage: y\nFile key: "**/*"\n'
     )
-    assert meta.auto_delete is False
+    assert meta.is_incremental is True
 
 
-def test_folder_parses_multiple_file_keys_and_allows_auto_delete_without_pk() -> None:
+def test_folder_parses_multiple_file_keys_and_allows_complete_mode_without_pk() -> None:
     meta = parse_object_metadata(
         textwrap.dedent(
             '''
@@ -76,12 +75,12 @@ def test_folder_parses_multiple_file_keys_and_allows_auto_delete_without_pk() ->
             File key:
               - "**/*.html"
               - "**/*.pdf"
-            Auto delete: true
+            Incremental: false
             '''
         )
     )
     assert meta.file_keys == ("**/*.html", "**/*.pdf")
-    assert meta.auto_delete is True
+    assert meta.is_incremental is False
 
 
 @pytest.mark.parametrize(
@@ -91,7 +90,7 @@ def test_folder_parses_multiple_file_keys_and_allows_auto_delete_without_pk() ->
 def test_folder_rejects_invalid_file_keys(declaration: str) -> None:
     with pytest.raises(MetadataError, match="File key"):
         parse_object_metadata(
-            f"Folder ID: Raw.Drop\nDescription: x\nLineage: y\n{declaration}\nAuto delete: false\n"
+            f"Folder ID: Raw.Drop\nDescription: x\nLineage: y\n{declaration}\n"
         )
 
 
@@ -153,14 +152,14 @@ def test_composite_primary_key_from_comma_text() -> None:
     assert meta.primary_key == ("a", "b")
 
 
-def test_no_pk_with_auto_delete_is_metadata_error() -> None:
-    with pytest.raises(MetadataError, match="Auto delete requires a Primary key"):
+def test_no_pk_incremental_table_is_metadata_error() -> None:
+    with pytest.raises(MetadataError, match="Incremental: true requires a Primary key"):
         parse_object_metadata(
-            "Table ID: A.B\nDescription: x\nLineage: y\nAuto delete: true\n"
+            "Table ID: A.B\nDescription: x\nLineage: y\nIncremental: true\n"
         )
 
 
-def test_auto_delete_true_with_pk_ok() -> None:
+def test_incremental_true_with_pk_ok() -> None:
     meta = parse_object_metadata(
         textwrap.dedent(
             """
@@ -168,14 +167,14 @@ def test_auto_delete_true_with_pk_ok() -> None:
             Description: x
             Lineage: y
             Primary key: id
-            Auto delete: true
+            Incremental: true
             """
         )
     )
-    assert meta.auto_delete is True
+    assert meta.is_incremental is True
 
 
-def test_auto_delete_defaults_by_object_kind_and_primary_key() -> None:
+def test_incremental_defaults_by_object_kind() -> None:
     keyed_table = parse_object_metadata(
         "Table ID: A.Keyed\nDescription: x\nLineage: y\nPrimary key: id\n"
     )
@@ -186,24 +185,46 @@ def test_auto_delete_defaults_by_object_kind_and_primary_key() -> None:
         'Folder ID: A.Files\nDescription: x\nLineage: y\nFile key: "**/*"\n'
     )
 
-    assert keyed_table.auto_delete is True
-    assert unkeyed_table.auto_delete is False
-    assert folder.auto_delete is False
+    assert keyed_table.is_incremental is False
+    assert unkeyed_table.is_incremental is False
+    assert folder.is_incremental is True
     assert keyed_table.effective_load_mode == UPSERT
     assert unkeyed_table.effective_load_mode == REPLACE
 
 
-def test_sql_table_uses_the_same_keyed_auto_delete_default() -> None:
+def test_sql_table_uses_complete_default() -> None:
     metadata_text, _body = extract_sql_metadata_and_body(
         "/*\nTable ID: A.Keyed\nDescription: x\nLineage: y\nPrimary key: id\n*/\nselect 1"
     )
-    assert parse_object_metadata(metadata_text).auto_delete is True
+    assert parse_object_metadata(metadata_text).is_incremental is False
 
 
-def test_auto_delete_must_be_boolean() -> None:
-    with pytest.raises(MetadataError, match="Auto delete must be a boolean"):
+def test_incremental_must_be_boolean() -> None:
+    with pytest.raises(MetadataError, match="Incremental must be a boolean"):
         parse_object_metadata(
-            "Table ID: A.B\nDescription: x\nLineage: y\nPrimary key: id\nAuto delete: yes please\n"
+            "Table ID: A.B\nDescription: x\nLineage: y\nPrimary key: id\nIncremental: yes please\n"
+        )
+
+
+def test_legacy_auto_delete_has_migration_guidance() -> None:
+    with pytest.raises(MetadataError, match="Auto delete is no longer supported"):
+        parse_object_metadata(
+            "Table ID: A.B\nDescription: x\nLineage: y\nPrimary key: id\nAuto delete: false\n"
+        )
+
+
+def test_both_policy_names_fail_immediately() -> None:
+    with pytest.raises(MetadataError, match="Auto delete is no longer supported"):
+        parse_object_metadata(
+            "Table ID: A.B\nDescription: x\nLineage: y\nPrimary key: id\n"
+            "Auto delete: false\nIncremental: true\n"
+        )
+
+
+def test_view_rejects_incremental() -> None:
+    with pytest.raises(MetadataError, match="not supported for View"):
+        parse_object_metadata(
+            "View ID: A.B\nDescription: x\nLineage: y\nIncremental: false\n"
         )
 
 

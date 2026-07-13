@@ -24,26 +24,26 @@ def validate_folder_result(
     issued,
     destination=None,
     file_keys=("**/*",),
-    auto_delete=False,
+    is_incremental=True,
 ):
     return _validate_folder_result(
         result,
         issued=issued,
         destination=destination,
         file_keys=file_keys,
-        auto_delete=auto_delete,
+        is_incremental=is_incremental,
     )
 
 
 def apply_folder_result(
-    upsert_path, delete, destination, *, file_keys=("**/*",), auto_delete=False
+    upsert_path, delete, destination, *, file_keys=("**/*",), is_incremental=True
 ):
     return _apply_folder_result(
         upsert_path,
         delete,
         destination,
         file_keys=file_keys,
-        auto_delete=auto_delete,
+        is_incremental=is_incremental,
     )
 
 
@@ -74,14 +74,14 @@ def _validate(
     delete=(),
     destination=None,
     file_keys=("**/*",),
-    auto_delete=False,
+    is_incremental=True,
 ):
     return validate_folder_result(
         (staging, delete),
         issued=[staging],
         destination=destination,
         file_keys=file_keys,
-        auto_delete=auto_delete,
+        is_incremental=is_incremental,
     )
 
 
@@ -253,14 +253,14 @@ def test_explicit_delete_must_match_file_key(tmp_path: Path) -> None:
         _validate(staging, delete=["old.json"], file_keys=("**/*.csv",))
 
 
-def test_auto_delete_rejects_explicit_deletes(tmp_path: Path) -> None:
+def test_non_incremental_rejects_explicit_deletes(tmp_path: Path) -> None:
     staging = _stage(tmp_path / "staging", {"a.csv": "x"})
     with pytest.raises(LoadError, match="cannot return explicit deletes"):
         _validate(
             staging,
             delete=["old.csv"],
             file_keys=("**/*.csv",),
-            auto_delete=True,
+            is_incremental=False,
         )
 
 
@@ -364,7 +364,7 @@ def test_destination_unchanged_when_validation_fails(tmp_path: Path) -> None:
     assert (destination / "a.csv").read_text() == "orig"
 
 
-def test_auto_delete_false_retains_unstaged_managed_files(tmp_path: Path) -> None:
+def test_incremental_retains_unstaged_managed_files(tmp_path: Path) -> None:
     destination = tmp_path / "dest"
     destination.mkdir()
     (destination / "old.csv").write_text("keep", encoding="utf-8")
@@ -375,48 +375,48 @@ def test_auto_delete_false_retains_unstaged_managed_files(tmp_path: Path) -> Non
         deletes,
         destination,
         file_keys=("**/*.csv",),
-        auto_delete=False,
+        is_incremental=True,
     )
     assert counts.deleted == 0
     assert (destination / "old.csv").is_file()
 
 
-def test_auto_delete_true_deletes_only_missing_managed_files(tmp_path: Path) -> None:
+def test_non_incremental_deletes_only_missing_managed_files(tmp_path: Path) -> None:
     destination = tmp_path / "dest"
     destination.mkdir()
     (destination / "old.csv").write_text("gone", encoding="utf-8")
     (destination / "notes.txt").write_text("outside", encoding="utf-8")
     staging = _stage(tmp_path / "staging", {"new.csv": "new"})
     upsert_path, deletes = _validate(
-        staging, file_keys=("**/*.csv",), auto_delete=True
+        staging, file_keys=("**/*.csv",), is_incremental=False
     )
     counts = apply_folder_result(
         upsert_path,
         deletes,
         destination,
         file_keys=("**/*.csv",),
-        auto_delete=True,
+        is_incremental=False,
     )
     assert counts.deleted == 1
     assert not (destination / "old.csv").exists()
     assert (destination / "notes.txt").read_text() == "outside"
 
 
-def test_empty_staging_auto_deletes_all_managed_files(tmp_path: Path) -> None:
+def test_empty_complete_staging_deletes_all_managed_files(tmp_path: Path) -> None:
     destination = tmp_path / "dest"
     destination.mkdir()
     (destination / "a.csv").write_text("gone", encoding="utf-8")
     (destination / "keep.json").write_text("keep", encoding="utf-8")
     staging = _stage(tmp_path / "staging", {})
     upsert_path, deletes = _validate(
-        staging, file_keys=("**/*.csv",), auto_delete=True
+        staging, file_keys=("**/*.csv",), is_incremental=False
     )
     counts = apply_folder_result(
         upsert_path,
         deletes,
         destination,
         file_keys=("**/*.csv",),
-        auto_delete=True,
+        is_incremental=False,
     )
     assert (counts.read, counts.deleted) == (0, 1)
     assert (destination / "keep.json").is_file()

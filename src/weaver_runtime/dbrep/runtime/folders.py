@@ -7,7 +7,7 @@ deleted. Weaver owns the destination — it validates the result, reconciles the
 destination, counts file-level CRUD, and cleans the staging folder.
 
 Incremental reconciliation scans the staged folder and exact explicit-delete
-paths. Auto-delete reconciliation inventories only destination leaf files that
+paths. Complete reconciliation inventories only destination leaf files that
 match the Folder's declared File keys; non-matching files remain outside the
 managed population.
 """
@@ -70,7 +70,7 @@ def validate_folder_result(
     *,
     issued: Iterable[StagingFolder],
     file_keys: tuple[str, ...],
-    auto_delete: bool,
+    is_incremental: bool,
     destination: Path | None = None,
 ) -> tuple[Path, tuple[str, ...]]:
     """Validate a ``Folder.read()`` result before any destination mutation.
@@ -115,7 +115,7 @@ def validate_folder_result(
         staged,
         destination,
         file_keys=file_keys,
-        auto_delete=auto_delete,
+        is_incremental=is_incremental,
     )
     staging_folder._consumed = True
     return staging_folder.path, deletes
@@ -127,7 +127,7 @@ def _validate_delete_paths(
     destination,
     *,
     file_keys: tuple[str, ...],
-    auto_delete: bool,
+    is_incremental: bool,
 ) -> tuple[str, ...]:
     if isinstance(delete, (str, bytes)):
         raise LoadError("Folder deletes must be a sequence of relative file names")
@@ -136,8 +136,8 @@ def _validate_delete_paths(
     except TypeError as exc:
         raise LoadError("Folder deletes must be a sequence of relative file names") from exc
 
-    if auto_delete and entries:
-        raise LoadError("Folder with Auto delete enabled cannot return explicit deletes")
+    if not is_incremental and entries:
+        raise LoadError("Non-incremental Folder cannot return explicit deletes")
 
     normalised: list[str] = []
     for raw in entries:
@@ -176,7 +176,7 @@ def apply_folder_result(
     destination: Path,
     *,
     file_keys: tuple[str, ...],
-    auto_delete: bool,
+    is_incremental: bool,
 ) -> CrudCounts:
     """Reconcile validated staged files into ``destination`` and count file CRUD.
 
@@ -212,7 +212,7 @@ def apply_folder_result(
                 updated += 1
 
         delete_paths = set(delete)
-        if auto_delete:
+        if not is_incremental:
             existing_managed = set(managed_relative_files(destination, file_keys))
             delete_paths.update(existing_managed - set(staged))
 

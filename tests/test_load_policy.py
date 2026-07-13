@@ -43,30 +43,30 @@ def test_empty_no_primary_key_load_empties_table() -> None:
     assert (outcome.inserted, outcome.updated, outcome.deleted) == (0, 0, 2)
 
 
-def test_primary_key_keep_missing_upsert() -> None:
+def test_incremental_primary_key_keeps_missing() -> None:
     existing = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
     incoming = _rows(("r2", "A", 22), ("r3", "B", 33), ("r4", "B", 40))
     outcome = run_table_load(
-        existing, incoming, primary_key=("record_id",), schema=SCHEMA, auto_delete=False
+        existing, incoming, primary_key=("record_id",), schema=SCHEMA, is_incremental=True
     )
     result = _by_id(outcome)
     assert result == {"r1": 10, "r2": 22, "r3": 33, "r4": 40}  # r1 kept
     assert outcome.inserted == 1
     assert outcome.updated == 2
     assert outcome.deleted == 0
-    assert outcome.auto_delete_ran is False
+    assert outcome.reconciliation_ran is False
 
 
-def test_primary_key_auto_delete_removes_missing() -> None:
+def test_non_incremental_primary_key_removes_missing() -> None:
     existing = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
     incoming = _rows(("r2", "A", 22), ("r3", "B", 33), ("r4", "B", 40))
     outcome = run_table_load(
-        existing, incoming, primary_key=("record_id",), schema=SCHEMA, auto_delete=True
+        existing, incoming, primary_key=("record_id",), schema=SCHEMA, is_incremental=False
     )
     result = _by_id(outcome)
     assert result == {"r2": 22, "r3": 33, "r4": 40}  # r1 deleted
     assert outcome.deleted == 1
-    assert outcome.auto_delete_ran is True
+    assert outcome.reconciliation_ran is True
 
 
 def test_blank_primary_key_is_rejected() -> None:
@@ -79,26 +79,27 @@ def test_blank_primary_key_is_rejected() -> None:
 def test_duplicate_incoming_primary_key_is_rejected() -> None:
     incoming = _rows(("r1", "A", 10), ("r3", "B", 31), ("r3", "B", 32))
     outcome = run_table_load([], incoming, primary_key=("record_id",), schema=SCHEMA)
-    assert _reasons(outcome).count(REASON_DUPLICATE_PK) == 2
-    assert _by_id(outcome) == {"r1": 10}  # both r3 rows rejected
+    assert _reasons(outcome).count(REASON_DUPLICATE_PK) == 1
+    assert _by_id(outcome) in ({"r1": 10, "r3": 31}, {"r1": 10, "r3": 32})
 
 
-def test_auto_delete_does_not_run_when_batch_has_rejects() -> None:
+def test_complete_reconciliation_runs_from_accepted_keys_with_rejects() -> None:
     existing = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
-    # Duplicate r3 + blank key create rejects; auto-delete must be suppressed.
+    # Duplicate r3 + blank key create rejects; r4 is absent and must be deleted.
     incoming = _rows(("r1", "A", 10), ("r2", "A", 22), ("r3", "B", 31), ("r3", "B", 32)) + [
         {"record_id": "", "group_id": "A", "amount": 5}
     ]
+    existing.append({"record_id": "r4", "group_id": "C", "amount": 40})
     outcome = run_table_load(
-        existing, incoming, primary_key=("record_id",), schema=SCHEMA, auto_delete=True
+        existing, incoming, primary_key=("record_id",), schema=SCHEMA, is_incremental=False
     )
-    assert outcome.auto_delete_ran is False
-    assert outcome.deleted == 0
+    assert outcome.reconciliation_ran is True
+    assert outcome.deleted == 1
     result = _by_id(outcome)
-    # Safe rows updated, r3 preserved from prior state (not deleted).
     assert result["r1"] == 10
     assert result["r2"] == 22
-    assert result["r3"] == 30
+    assert result["r3"] in (31, 32)
+    assert "r4" not in result
 
 
 def test_missing_schema_column_fails_load() -> None:
@@ -138,12 +139,12 @@ def test_explicit_single_key_delete_removes_only_named_row() -> None:
         incoming,
         primary_key=("record_id",),
         schema=SCHEMA,
-        auto_delete=False,
+        is_incremental=True,
         explicit_delete_keys=(("r1",),),
     )
     assert _by_id(outcome) == {"r2": 22, "r3": 30}  # r1 deleted, r3 kept
     assert outcome.deleted == 1
-    assert outcome.auto_delete_ran is False
+    assert outcome.reconciliation_ran is False
     assert (
         outcome.explicit_delete_keys_read,
         outcome.explicit_delete_keys_matched,
@@ -163,7 +164,7 @@ def test_explicit_composite_key_delete_follows_declared_order() -> None:
         incoming,
         primary_key=("agency", "period"),
         schema=COMPOSITE_SCHEMA,
-        auto_delete=False,
+        is_incremental=True,
         explicit_delete_keys=(("a", "2026-07"), ("b", "2026-06")),
     )
     assert {(r["agency"], r["period"]) for r in outcome.final_rows} == {("c", "2026-05")}
@@ -178,6 +179,7 @@ def test_unmatched_explicit_delete_does_not_increment_deleted() -> None:
         [],
         primary_key=("record_id",),
         schema=SCHEMA,
+        is_incremental=True,
         explicit_delete_keys=(("nope",),),
     )
     assert outcome.deleted == 0
@@ -196,6 +198,7 @@ def test_duplicate_explicit_delete_tuples_deduplicated() -> None:
         [],
         primary_key=("record_id",),
         schema=SCHEMA,
+        is_incremental=True,
         explicit_delete_keys=(("r1",), ("r1",)),
     )
     assert outcome.deleted == 1
@@ -209,6 +212,7 @@ def test_key_both_staged_and_explicitly_deleted_is_upserted() -> None:
         _rows(("r1", "A", 99)),
         primary_key=("record_id",),
         schema=SCHEMA,
+        is_incremental=True,
         explicit_delete_keys=(("r1",),),
     )
     assert _by_id(outcome) == {"r1": 99}  # upsert wins over the delete
@@ -219,7 +223,8 @@ def test_key_both_staged_and_explicitly_deleted_is_upserted() -> None:
 def test_null_value_in_delete_tuple_is_rejected() -> None:
     with pytest.raises(LoadError, match="null primary-key value"):
         run_table_load(
-            [], [], primary_key=("record_id",), schema=SCHEMA, explicit_delete_keys=((None,),)
+            [], [], primary_key=("record_id",), schema=SCHEMA,
+            is_incremental=True, explicit_delete_keys=((None,),)
         )
 
 
@@ -230,6 +235,7 @@ def test_wrong_delete_tuple_arity_is_rejected() -> None:
             [],
             primary_key=("record_id",),
             schema=SCHEMA,
+            is_incremental=True,
             explicit_delete_keys=(("r1", "extra"),),
         )
 
@@ -237,7 +243,8 @@ def test_wrong_delete_tuple_arity_is_rejected() -> None:
 def test_non_tuple_delete_entry_is_rejected() -> None:
     with pytest.raises(LoadError, match="tuples of primary-key values"):
         run_table_load(
-            [], [], primary_key=("record_id",), schema=SCHEMA, explicit_delete_keys=("r1",)
+            [], [], primary_key=("record_id",), schema=SCHEMA,
+            is_incremental=True, explicit_delete_keys=("r1",)
         )
 
 
@@ -253,26 +260,26 @@ def test_explicit_delete_without_primary_key_fails() -> None:
         )
 
 
-def test_auto_delete_without_primary_key_fails() -> None:
-    with pytest.raises(LoadError, match="Automatic row deletion requires a declared primary key"):
+def test_incremental_without_primary_key_fails() -> None:
+    with pytest.raises(LoadError, match="Incremental table loading requires a declared primary key"):
         run_table_load(
             [],
             [],
             primary_key=(),
             schema=SCHEMA,
-            auto_delete=True,
+            is_incremental=True,
             object_name="Sales.CustomerOrder",
         )
 
 
-def test_auto_delete_with_explicit_deletes_fails() -> None:
-    with pytest.raises(LoadError, match="either automatic deletion or explicit deletion, not both"):
+def test_complete_reconciliation_with_explicit_deletes_fails() -> None:
+    with pytest.raises(LoadError, match="either complete reconciliation or explicit deletion, not both"):
         run_table_load(
             [],
             [],
             primary_key=("record_id",),
             schema=SCHEMA,
-            auto_delete=True,
+            is_incremental=False,
             explicit_delete_keys=(("r1",),),
             object_name="Sales.CustomerOrder",
         )
@@ -281,11 +288,11 @@ def test_auto_delete_with_explicit_deletes_fails() -> None:
 def test_authority_error_names_the_table() -> None:
     with pytest.raises(LoadError, match="Table Sales.CustomerOrder"):
         run_table_load(
-            [], [], primary_key=(), schema=SCHEMA, auto_delete=True, object_name="Sales.CustomerOrder"
+            [], [], primary_key=(), schema=SCHEMA, is_incremental=True, object_name="Sales.CustomerOrder"
         )
 
 
-def test_auto_delete_with_empty_explicit_still_auto_deletes() -> None:
+def test_complete_mode_with_empty_explicit_reconciles() -> None:
     existing = _rows(("r1", "A", 10), ("r2", "A", 20))
     incoming = _rows(("r2", "A", 22))
     outcome = run_table_load(
@@ -293,15 +300,15 @@ def test_auto_delete_with_empty_explicit_still_auto_deletes() -> None:
         incoming,
         primary_key=("record_id",),
         schema=SCHEMA,
-        auto_delete=True,
+        is_incremental=False,
         explicit_delete_keys=(),
     )
-    assert outcome.auto_delete_ran is True
+    assert outcome.reconciliation_ran is True
     assert outcome.deleted == 1
     assert _by_id(outcome) == {"r2": 22}
 
 
-def test_no_pk_no_auto_empty_explicit_is_replacement() -> None:
+def test_no_pk_empty_explicit_is_replacement() -> None:
     outcome = run_table_load(
         _rows(("r1", "A", 10)),
         _rows(("r2", "A", 20)),
@@ -314,7 +321,7 @@ def test_no_pk_no_auto_empty_explicit_is_replacement() -> None:
 
 
 def test_three_run_behaviour_matches_fixture_expectations() -> None:
-    """Mirror the plan's run 1/2/3 for auto-delete vs keep-missing tables."""
+    """Mirror three runs for complete vs incremental tables."""
 
     run1 = _rows(("r1", "A", 10), ("r2", "A", 20), ("r3", "B", 30))
     run2 = _rows(("r1", "A", 10), ("r2", "A", 22), ("r3", "B", 31), ("r3", "B", 32)) + [
@@ -322,22 +329,26 @@ def test_three_run_behaviour_matches_fixture_expectations() -> None:
     ]
     run3 = _rows(("r2", "A", 22), ("r3", "B", 33), ("r4", "B", 40))
 
-    def load(existing, incoming, auto_delete):
+    def load(existing, incoming, is_incremental):
         return run_table_load(
-            existing, incoming, primary_key=("record_id",), schema=SCHEMA, auto_delete=auto_delete
+            existing,
+            incoming,
+            primary_key=("record_id",),
+            schema=SCHEMA,
+            is_incremental=is_incremental,
         )
 
-    # Auto-delete table.
-    auto = load([], run1, True).final_rows
-    out2 = load(auto, run2, True)
-    assert out2.auto_delete_ran is False  # rejects present
-    auto = out2.final_rows
-    out3 = load(auto, run3, True)
-    assert out3.auto_delete_ran is True
-    assert set(row["record_id"] for row in out3.final_rows) == {"r2", "r3", "r4"}  # r1 removed
+    # Complete table.
+    complete = load([], run1, False).final_rows
+    out2 = load(complete, run2, False)
+    assert out2.reconciliation_ran is True
+    complete = out2.final_rows
+    out3 = load(complete, run3, False)
+    assert out3.reconciliation_ran is True
+    assert set(row["record_id"] for row in out3.final_rows) == {"r2", "r3", "r4"}
 
     # Keep-missing table, same inputs.
-    keep = load([], run1, False).final_rows
-    keep = load(keep, run2, False).final_rows
-    keep = load(keep, run3, False).final_rows
+    keep = load([], run1, True).final_rows
+    keep = load(keep, run2, True).final_rows
+    keep = load(keep, run3, True).final_rows
     assert "r1" in {row["record_id"] for row in keep}  # r1 retained

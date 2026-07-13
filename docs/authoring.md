@@ -113,14 +113,14 @@ return staging_folder, ()
 ```
 
 Every Folder metadata block must explicitly declare its managed file population.
-`Auto delete` defaults to `false` for folders and may be declared when a different
-mode is required:
+Folders default to `Incremental: true`; declare `false` when each result is the
+complete managed population:
 
 ```yaml
 File key:
   - "**/*.pdf"
   - "**/*.json"
-Auto delete: false
+Incremental: true
 ```
 
 A single glob string is also valid. File keys match relative POSIX paths, and
@@ -129,9 +129,9 @@ target mutation if any staged leaf file does not match at least one File key.
 
 Weaver reconciles managed staged files against the target and counts file CRUD
 (`created`/`updated`/`read`-only by size then content; `deleted` for files that
-existed). With `Auto delete: false`, missing managed target files are retained
+existed). With `Incremental: true`, missing managed target files are retained
 and explicit deletes are allowed only when they match a File key. With
-`Auto delete: true`, staging is the complete managed population: Weaver deletes
+`Incremental: false`, staging is the complete managed population: Weaver deletes
 matching target files absent from staging and rejects explicit deletes.
 Non-matching target files are never counted, changed, or deleted.
 
@@ -141,9 +141,9 @@ Non-matching target files are never counted, changed, or deleted.
   artefacts should stay **outside** staging unless meant to persist — otherwise
   validation fails. Nested matching files count individually; directories are
   never CRUD units.
-- **Deletion has one mode.** With `Auto delete: false`, delete entries are exact
+- **Deletion has one mode.** With `Incremental: true`, delete entries are exact
   relative file names — never absolute, `..`-traversing, a glob, or a directory.
-  With `Auto delete: true`, explicit deletes must be empty. A path cannot be both
+  With `Incremental: false`, explicit deletes must be empty. A path cannot be both
   staged and explicitly deleted.
 - **Reserved Weaver files** such as `_weaver.json` cannot be staged, replaced, or
   deleted.
@@ -163,11 +163,11 @@ reconciliation.
 A table without a primary key is a full replacement: its accepted incoming rows
 become the complete table, and an empty incoming DataFrame empties it. Append-like
 audit/event tables therefore need a primary key that uniquely identifies each
-event and `Auto delete: false`. These rules are shared by Spark/Delta and SQL
+event and `Incremental: true`. These rules are shared by Spark/Delta and SQL
 tables.
 
-`Auto delete` defaults to `true` for a table with a primary key and `false` for a
-table without one. An explicit declaration overrides the keyed-table default.
+Tables default to `Incremental: false`, meaning the returned table is the complete
+current population. `Incremental: true` requires a primary key.
 
 ```python
 # single-column primary key
@@ -181,20 +181,27 @@ primary_key_values_to_delete = (("agency-a", "2026-07"), ("agency-b", "2026-06")
 
 > No primary key means no row deletion.
 
-| Primary key | Auto delete | Explicit delete tuples | Result |
+| Primary key | Incremental | Explicit delete tuples | Result |
 |---|---|---|---|
-| absent  | false | empty     | allowed (no deletes) |
+| absent  | false | empty     | allowed (full replacement) |
 | absent  | false | populated | **error** |
 | absent  | true  | any       | **error** |
-| present | false | empty     | allowed (no deletes) |
-| present | false | populated | apply explicit deletes |
-| present | true  | empty     | derive automatic deletes |
-| present | true  | populated | **error** |
+| present | false | empty     | derive missing-key deletes |
+| present | false | populated | **error** |
+| present | true  | empty     | retain missing keys |
+| present | true  | populated | apply explicit deletes |
 
-`Auto delete: true` lets Weaver derive deletions by comparing returned keys with
-existing keys; `Auto delete: false` deletes only the explicitly returned tuples.
-A table cannot use both. Explicit delete tuples must match the primary-key arity,
+`Incremental` controls how Weaver applies the result returned by `read()`. When
+true, existing managed files or primary-key rows absent from this run are retained.
+It does not determine how the object selects source files or rows. Explicit delete
+tuples are available only in incremental mode and must match the primary-key arity,
 contain no null values, and are deduplicated; a key that is both staged and
 explicitly deleted is upserted (the delete is counted unmatched). Row CRUD counts
 `deleted` for rows actually removed; details add `accepted`, `rejected`,
-`auto_delete_ran`, and `explicit_delete_keys_read`/`matched`/`unmatched`.
+`reconciliation_ran`, and `explicit_delete_keys_read`/`matched`/`unmatched`.
+
+For keyed tables, Weaver cleanses staging before comparing it with the target.
+Rows with blank primary keys are rejected. For each duplicated non-blank key, one
+unspecified representative is accepted and only the surplus rows are rejected.
+Accepted staging drives inserts, updates, and complete missing-key reconciliation;
+rejects do not prevent valid rows from loading or suppress reconciliation.

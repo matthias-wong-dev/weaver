@@ -3,7 +3,7 @@ Table ID: Mart.RecordCurrentAuto
 Description: Current records with auto-delete of missing keys.
 Lineage: Reads the raw drop directly so rejects gate auto-delete.
 Primary key: record_id
-Auto delete: true
+Incremental: false
 Schema:
   record_id: string
   group_id: string

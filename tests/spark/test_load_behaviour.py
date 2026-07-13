@@ -81,12 +81,14 @@ def test_three_run_load_behaviour(tmp_path: Path, spark, monkeypatch) -> None:
     assert spark.read.format("delta").load(str(audit)).count() == 3
     assert spark.read.format("delta").load(str(snapshot)).count() == 3
 
-    # Run 2: duplicate r3 + blank record_id -> rejects; auto-delete suppressed.
+    # Run 2: one duplicate r3 is accepted, the surplus and blank key are rejected.
     run(RUN_2)
-    assert _table(spark, auto) == {"r1": 10, "r2": 22, "r3": 30}  # r1 NOT deleted
-    assert _table(spark, keep) == {"r1": 10, "r2": 22, "r3": 30}
+    assert _table(spark, auto)["r3"] in (31, 32)
+    assert _table(spark, auto)["r1"] == 10
+    assert _table(spark, keep)["r3"] in (31, 32)
+    assert _table(spark, keep)["r1"] == 10
     assert (rejects / "T1.Mart.RecordCurrentAuto" / "rejects.json").is_file()
-    # The audit's artificial UUID primary key plus Auto delete: false inserts
+    # The audit's artificial UUID primary key plus Incremental: true inserts
     # every batch: 3 (run 1) + 5 (run 2) = 8 distinct audit records.
     audit_frame = spark.read.format("delta").load(str(audit))
     assert audit_frame.count() == 8
@@ -94,18 +96,18 @@ def test_three_run_load_behaviour(tmp_path: Path, spark, monkeypatch) -> None:
     # The no-key default is replacement: only run 2's five rows remain.
     assert spark.read.format("delta").load(str(snapshot)).count() == 5
 
-    # Run 3: clean batch -> auto-delete removes the now-missing r1.
+    # Run 3: clean batch -> complete reconciliation removes the now-missing r1.
     run3 = run(RUN_3)
     assert _table(spark, auto) == {"r2": 22, "r3": 33, "r4": 40}  # r1 deleted
     assert _table(spark, keep) == {"r1": 10, "r2": 22, "r3": 33, "r4": 40}  # r1 retained
     assert spark.read.format("delta").load(str(audit)).count() == 11
     assert _table(spark, snapshot) == {"r2": 22, "r3": 33, "r4": 40}
 
-    # Stage.Record does not declare Auto delete. Its primary key makes the table
-    # default to auto-delete=true, so run 3 removes the missing r1 before the
+    # Stage.Record does not declare Incremental. Tables default to complete
+    # reconciliation, so run 3 removes the missing r1 before the
     # downstream aggregate is calculated.
     stage_step = next(step for step in run3.steps if step.object_id == "T1.Stage.Record")
-    assert stage_step.details["auto_delete_ran"] is True
+    assert stage_step.details["reconciliation_ran"] is True
     assert stage_step.crud.deleted == 1
     assert {
         row["group_id"]: row["amount"]

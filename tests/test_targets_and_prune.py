@@ -97,7 +97,7 @@ def test_delta_adapter_is_plan_only_with_policy_operations(tmp_path: Path) -> No
     ses_root, config = _config(tmp_path)
     write_python_table(
         ses_root / "T1", "Stage", "Record",
-        primary_key="record_id", auto_delete=True,
+        primary_key="record_id", is_incremental=False,
         schema_cols=(("record_id", "string"), ("amount", "int")),
     )
     plan = plan_build(
@@ -109,7 +109,7 @@ def test_delta_adapter_is_plan_only_with_policy_operations(tmp_path: Path) -> No
     assert action.applied is False  # plan-only
     assert "apply schema declaration" in action.operations
     assert "record primary key" in action.operations
-    assert "record auto-delete policy" in action.operations
+    assert "record complete-reconciliation policy" in action.operations
 
 
 def test_sql_adapter_plans_view_and_table(tmp_path: Path) -> None:

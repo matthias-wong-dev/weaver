@@ -66,7 +66,7 @@ class Table(WeaverObject):
     primary_key_values_to_delete)``: a Spark DataFrame of rows to insert or update
     and a sequence of primary-key tuples identifying rows to delete (in declared
     primary-key column order). Explicit deletion requires a declared primary key and
-    cannot be combined with ``Auto delete: true``. ``schema`` may declare an
+    cannot be combined with ``Incremental: false``. ``schema`` may declare an
     ordered ``{column: type}`` mapping used to enforce and cast the frame::
 
         def read(self, spark):

@@ -47,7 +47,7 @@ def _folder_object(schema: str, obj: str, *, class_name: str | None = None) -> s
         Description: {obj} folder.
         Lineage: Writes {obj}.
         File key: "**/*"
-        Auto delete: false
+        Incremental: true
         """
 
         from weaver_runtime.dbrep.objects import Folder

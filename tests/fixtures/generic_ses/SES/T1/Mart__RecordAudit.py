@@ -3,7 +3,7 @@ Table ID: Mart.RecordAudit
 Description: Append-only audit of every raw row.
 Lineage: Reads the raw drop directly and appends all rows.
 Primary key: audit_id
-Auto delete: false
+Incremental: true
 Schema:
   audit_id: string
   record_id: string

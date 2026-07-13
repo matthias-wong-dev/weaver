@@ -3,7 +3,7 @@ Table ID: Mart.RecordCurrentKeep
 Description: Current records that keep missing keys.
 Lineage: Reads the raw drop directly; never deletes missing keys.
 Primary key: record_id
-Auto delete: false
+Incremental: true
 Schema:
   record_id: string
   group_id: string

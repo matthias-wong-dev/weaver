@@ -99,7 +99,7 @@ Both kinds implement `read()` returning one `(upserts, deletes)` pair (never
 never writes the destination directly); `Table.read(spark)` →
 `(staging_dataframe, primary_key_values_to_delete)`. Weaver owns all
 mutation, CRUD counting, and logging. Deletion has one authority: a table without
-a primary key cannot delete rows, and `Auto delete: true` and explicit delete
+a primary key cannot delete rows, and `Incremental: false` and explicit delete
 tuples cannot be combined (enforced in `runtime/load_policy.py` before any
 write). `runtime/folders.py` is the pure staging contract + reconciliation (file
 CRUD by size/content diff over only the staged files and explicit deletes, never

@@ -20,6 +20,7 @@ def generate_load_stored_procedure_sql(
     target_table_name: str,
     *,
     primary_key_columns: list[str] | None = None,
+    is_incremental: bool = False,
 ) -> str:
     """Generate SQL that creates a static ETL stored procedure."""
 
@@ -34,6 +35,7 @@ def generate_load_stored_procedure_sql(
         table_names=table_names,
         runtime_staging_sql=runtime_staging_sql,
         primary_key_columns=primary_key_columns,
+        is_incremental=is_incremental,
     )
 
     return render_sql_template(
@@ -51,12 +53,14 @@ def _render_static_load_procedure_template(
     table_names,
     runtime_staging_sql: str,
     primary_key_columns: list[str],
+    is_incremental: bool,
 ) -> str:
     has_primary_key = bool(primary_key_columns)
     if primary_key_columns:
         load_body = _render_static_primary_key_load_body(
             table_names=table_names,
             primary_key_columns=primary_key_columns,
+            is_incremental=is_incremental,
         )
     else:
         load_body = _render_static_full_refresh_load_body(table_names=table_names)
@@ -81,6 +85,7 @@ def _render_start_artifact_cleanup(table_names) -> str:
     return (
         f"if object_id({_sql_string_literal(table_names.reject_table)}, N'U') is not null drop table {table_names.reject_table};\n"
         f"if object_id({_sql_string_literal(table_names.upsert_table)}, N'U') is not null drop table {table_names.upsert_table};\n"
+        f"if object_id({_sql_string_literal(table_names.accepted_table)}, N'U') is not null drop table {table_names.accepted_table};\n"
         f"if object_id({_sql_string_literal(table_names.staging_table)}, N'U') is not null drop table {table_names.staging_table};"
     )
 
@@ -167,33 +172,33 @@ def _render_static_primary_key_load_body(
     *,
     table_names,
     primary_key_columns: list[str],
+    is_incremental: bool,
 ) -> str:
     staging_target_join = _pk_join_predicate("s", "t", primary_key_columns)
     current_upsert_join = _pk_join_predicate("c", "u", primary_key_columns)
     history_upsert_join = _pk_join_predicate("h", "u", primary_key_columns)
     staging_current_join = _pk_join_predicate("s", "c", primary_key_columns)
     staging_history_join = _pk_join_predicate("s", "h", primary_key_columns)
-    upsert_reject_join = _pk_join_predicate("u", "r", primary_key_columns)
-    upsert_null_case_predicate = _pk_null_predicate(
-        "u",
+    staging_blank_case_predicate = _pk_blank_predicate(
+        "s",
         primary_key_columns,
         line_indent="                ",
         closing_indent="            ",
     )
-    upsert_null_where_predicate = _pk_null_predicate(
-        "u",
+    staging_blank_where_predicate = _pk_blank_predicate(
+        "s",
         primary_key_columns,
         line_indent="            ",
         closing_indent="        ",
     )
-    duplicate_partition_columns = _pk_partition_columns("u", primary_key_columns)
+    duplicate_partition_columns = _pk_partition_columns("s", primary_key_columns)
     target_missing_predicate = f"t.{_quote_identifier_part(primary_key_columns[0])} is null"
     delete_missing_filter = (
-        f"not exists (select 1 from {table_names.staging_table} as s "
+        f"not exists (select 1 from {table_names.accepted_table} as s "
         f"where {staging_current_join})"
     )
     delete_history_unwind_filter = (
-        f"not exists (select 1 from {table_names.staging_table} as s "
+        f"not exists (select 1 from {table_names.accepted_table} as s "
         f"where {staging_history_join})"
     )
 
@@ -201,21 +206,52 @@ def _render_static_primary_key_load_body(
         "etl/primary_key_body",
         upsert_table=table_names.upsert_table,
         staging_table=table_names.staging_table,
+        accepted_table=table_names.accepted_table,
         reject_table=table_names.reject_table,
         current_table=table_names.current_table,
         history_table=table_names.history_table,
         view_name=table_names.view_name,
         target_missing_predicate=target_missing_predicate,
         staging_target_join=staging_target_join,
-        upsert_null_case_predicate=upsert_null_case_predicate,
-        upsert_null_where_predicate=upsert_null_where_predicate,
+        staging_blank_case_predicate=staging_blank_case_predicate,
+        staging_blank_where_predicate=staging_blank_where_predicate,
         duplicate_partition_columns=duplicate_partition_columns,
-        upsert_reject_join=upsert_reject_join,
         current_upsert_join=current_upsert_join,
         history_upsert_join=history_upsert_join,
-        delete_missing_filter=delete_missing_filter,
-        delete_history_unwind_filter=delete_history_unwind_filter,
+        missing_reconciliation=(
+            ""
+            if is_incremental
+            else _render_missing_reconciliation(
+                table_names, delete_missing_filter, delete_history_unwind_filter
+            )
+        ),
     )
+
+
+def _render_missing_reconciliation(
+    table_names, delete_missing_filter: str, delete_history_unwind_filter: str
+) -> str:
+    return f"""begin try
+    insert into {table_names.history_table} (
+        __HISTORY_COLUMNS__
+    )
+    select
+        __HISTORY_SELECT_COLUMNS__
+    from {table_names.current_table} as c
+    where {delete_missing_filter};
+
+    delete c
+    from {table_names.current_table} as c
+    where {delete_missing_filter};
+end try
+begin catch
+    delete h
+    from {table_names.history_table} as h
+    where h.[Row delete datetime] = @weaver_load_datetime
+        and {delete_history_unwind_filter};
+
+    throw;
+end catch;"""
 
 
 def _render_primary_key_name_values(primary_key_columns: list[str]) -> str:
@@ -236,7 +272,7 @@ def _pk_join_predicate(left_alias: str, right_alias: str, columns: list[str]) ->
     return "\n    and ".join(predicates)
 
 
-def _pk_null_predicate(
+def _pk_blank_predicate(
     alias: str,
     columns: list[str],
     *,
@@ -244,7 +280,7 @@ def _pk_null_predicate(
     closing_indent: str,
 ) -> str:
     predicates = [
-        f"{alias}.{_quote_identifier_part(column)} is null"
+        f"nullif(trim(cast({alias}.{_quote_identifier_part(column)} as varchar(max))), '') is null"
         for column in columns
     ]
     if not predicates:

@@ -124,7 +124,7 @@ def build_table_dictionary(objects: Sequence) -> dict:
                 "notes": _string_metadata(metadata.raw.get("Notes")),
                 "static": metadata.static,
                 "load_mode": metadata.effective_load_mode,
-                "auto_delete": metadata.auto_delete,
+                "is_incremental": metadata.is_incremental,
             }
         )
     return {"version": 1, "tables": tables}

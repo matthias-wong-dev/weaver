@@ -261,14 +261,14 @@ def _execute_folder_step(
             issued=context.issued_staging(),
             destination=destination,
             file_keys=source_object.metadata.file_keys,
-            auto_delete=source_object.metadata.auto_delete,
+            is_incremental=source_object.metadata.is_incremental,
         )
         counts = apply_folder_result(
             upsert_path,
             delete_names,
             destination,
             file_keys=source_object.metadata.file_keys,
-            auto_delete=source_object.metadata.auto_delete,
+            is_incremental=source_object.metadata.is_incremental,
         )
     finally:
         context.cleanup_staging()
@@ -318,7 +318,7 @@ def _execute_table_step(
         incoming,
         primary_key=metadata.primary_key,
         schema=schema,
-        auto_delete=metadata.auto_delete,
+        is_incremental=metadata.is_incremental,
         load_mode=metadata.load_mode,
         explicit_delete_keys=delete_keys,
         object_name=object_id,
@@ -338,7 +338,7 @@ def _execute_table_step(
     log.details = {
         "accepted": counts["accepted"],
         "rejected": counts["rejected"],
-        "auto_delete_ran": outcome.auto_delete_ran,
+        "reconciliation_ran": outcome.reconciliation_ran,
         "explicit_delete_keys_read": outcome.explicit_delete_keys_read,
         "explicit_delete_keys_matched": outcome.explicit_delete_keys_matched,
         "explicit_delete_keys_unmatched": outcome.explicit_delete_keys_unmatched,
