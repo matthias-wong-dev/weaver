@@ -5,11 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from dbrep_helpers import make_config, resolve, write_config_files, write_python_table
+from dbrep_helpers import (
+    make_config,
+    resolve,
+    write_config_files,
+    write_python_table,
+    write_sql_table,
+)
 from weaver_runtime.dbrep.build import BuildPair, BuildRequest, plan_build
 from weaver_runtime.dbrep.build.runtime_bundle import install_build
 from weaver_runtime.dbrep.cli.commands import run_load
 from weaver_runtime.dbrep.errors import BuildError
+from weaver_runtime.dbrep.sql import backend as sql_backend
 from weaver_runtime.dbrep.sql.backend import build_sql_target
 from weaver_runtime.dbrep.targets.fabric_lakehouse import FabricLakehouseHost
 
@@ -96,6 +103,59 @@ def test_sql_build_requires_sql_source_objects(tmp_path: Path) -> None:
     assert python_objects  # _sql_setup writes a python Mart.Aggregate
     with pytest.raises(BuildError, match="requires .sql source objects"):
         build_sql_target(python_objects, target)
+
+
+def test_sql_build_creates_shared_schemas_before_parallel_installs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ses_root = tmp_path / "SES"
+    write_sql_table(ses_root / "T2", "mart", "First")
+    write_sql_table(ses_root / "T2", "mart", "Second")
+    config = make_config(
+        tmp_path,
+        {
+            "SES_Repo": {"server": str(ses_root)},
+            "Warehouse": {"server": "endpoint.example.com"},
+        },
+        {
+            "T2_SES": {"type": "SES", "server": "SES_Repo", "database": "T2"},
+            "T2_SQL": {"type": "SQL", "server": "Warehouse", "database": "T2"},
+        },
+    )
+    plan = plan_build(
+        BuildRequest(
+            pairs=(
+                BuildPair(resolve(config, "T2_SES"), resolve(config, "T2_SQL")),
+            )
+        )
+    )
+    target = resolve(config, "T2_SQL")
+    scripts = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(sql_backend, "connect", lambda *_: FakeConnection())
+    monkeypatch.setattr(
+        sql_backend, "execute_script", lambda _connection, sql: scripts.append(sql)
+    )
+    monkeypatch.setattr(sql_backend, "_read_manifest", lambda _connection: {})
+    monkeypatch.setattr(sql_backend, "_install_object_ddl", lambda *_: None)
+    monkeypatch.setattr(sql_backend, "_install_load_procedure", lambda *_: None)
+    monkeypatch.setattr(sql_backend, "_upsert_manifest_row", lambda *_: None)
+
+    result = build_sql_target(plan.objects, target, degrees_of_parallelism=2)
+
+    assert result.schemas == ("_", "_weaver", "mart")
+    assert scripts[:3] == [
+        "if schema_id(N'_') is null exec(N'create schema [_]');",
+        "if schema_id(N'_weaver') is null exec(N'create schema [_weaver]');",
+        "if schema_id(N'mart') is null exec(N'create schema [mart]');",
+    ]
 
 
 def test_fabric_host_interface_is_documented_stub(tmp_path: Path) -> None:

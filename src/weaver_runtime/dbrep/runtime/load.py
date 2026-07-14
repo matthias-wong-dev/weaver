@@ -18,8 +18,8 @@ from pathlib import Path
 from ..errors import LoadError
 from ..objects import Folder, Table, View, WeaverObject
 from .context import LoadContext, Repo
+from .delta_table_load import execute_delta_table_load
 from .folders import apply_folder_result, validate_folder_result
-from .load_policy import run_table_load
 from .logging import (
     CrudCounts,
     LoadReport,
@@ -28,11 +28,6 @@ from .logging import (
     require_load_pair,
 )
 from .rejects import write_rejects
-from .spark_io import (
-    delta_exists,
-    read_delta_rows,
-    struct_type,
-)
 from .workflow_logging import (
     create_workflow_id,
     create_workflow_log_dir,
@@ -59,6 +54,12 @@ def create_delta_session(
         .master(os.environ.get("WEAVER_SPARK_MASTER", "local[1]"))
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "1")
+        # Delta otherwise reconstructs snapshots with 50 tasks. That is useful
+        # on a cluster but pure scheduler overhead in Weaver's local[1] runtime.
+        .config(
+            "spark.databricks.delta.snapshotPartitions",
+            os.environ.get("WEAVER_DELTA_SNAPSHOT_PARTITIONS", "1"),
+        )
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config(
             "spark.sql.catalog.spark_catalog",
@@ -314,12 +315,11 @@ def _execute_table_step(
     _require_dataframe(staging_dataframe)
 
     frame = _align_frame_to_schema(staging_dataframe, schema)
-    incoming = [row.asDict(recursive=True) for row in frame.collect()]
-    existing = read_delta_rows(spark, table_path)
     metadata = source_object.metadata
-    outcome = run_table_load(
-        existing,
-        incoming,
+    outcome = execute_delta_table_load(
+        spark,
+        frame,
+        table_path,
         primary_key=metadata.primary_key,
         schema=schema,
         is_incremental=metadata.is_incremental,
@@ -327,7 +327,6 @@ def _execute_table_step(
         explicit_delete_keys=delete_keys,
         object_name=object_id,
     )
-    _write_delta(spark, outcome, table_path, schema)
     write_rejects(lakehouse_root, object_id, outcome.rejected)
     loaded[object_id] = spark.read.format("delta").load(str(table_path))
 
@@ -342,6 +341,7 @@ def _execute_table_step(
     log.details = {
         "accepted": counts["accepted"],
         "rejected": counts["rejected"],
+        "physical_write_ran": outcome.wrote,
         "reconciliation_ran": outcome.reconciliation_ran,
         "explicit_delete_keys_read": outcome.explicit_delete_keys_read,
         "explicit_delete_keys_matched": outcome.explicit_delete_keys_matched,
@@ -493,22 +493,6 @@ def _align_frame_to_schema(frame, schema):
         )
     except Exception as exc:
         raise LoadError("failed to apply Spark SQL schema casts") from exc
-
-
-def _write_delta(spark, outcome, table_path, schema) -> None:
-    rows = outcome.final_rows
-    if rows:
-        frame = spark.createDataFrame(rows, schema=struct_type(schema))
-    elif schema:
-        frame = spark.createDataFrame([], schema=struct_type(schema))
-    elif delta_exists(spark, table_path):
-        empty = spark.read.format("delta").load(str(table_path)).schema
-        frame = spark.createDataFrame([], schema=empty)
-    else:
-        return
-    frame.write.format("delta").mode("overwrite").option(
-        "overwriteSchema", "true"
-    ).save(str(table_path))
 
 
 def _schema_by_object(column_dictionary: dict) -> dict[str, tuple[tuple[str, str], ...]]:
