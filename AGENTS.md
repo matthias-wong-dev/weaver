@@ -1,179 +1,161 @@
 # Weaver Agent Guide
 
-## Repository Role
+Guidance for coding agents working **on Weaver itself**. For how to *use* Weaver,
+read the user documentation (below) — do not duplicate it here.
 
-`weaver` owns generic operational tooling for Microsoft Fabric and related
-runtime surfaces:
+## Repository role
 
-- Fabric authentication and API helpers.
-- Fabric capacity control.
-- Internal DBRep OneLake transfer for remote runtime and build payloads.
-- Fabric workspace item deployment.
-- Fabric notebook execution.
-- Fabric Spark execution via Livy.
-- SQL execution against the Fabric Warehouse / SQL endpoint.
-- The `generate`/`build`/`load`/`wipe` database-representation lifecycle.
+`weaver` is a generic data-engineering runtime and operational toolkit for
+Microsoft Fabric. It owns:
+
+- The `generate` / `build` / `load` / `wipe` database-representation lifecycle.
+- SES discovery, static dependency analysis, and dependency-ordered execution.
+- Reconciliation, CRUD accounting, and durable workflow logging.
+- The SQL backend (self-inferring backing table + view + load procedure).
+- The Fabric substrate: authentication, capacity control, OneLake transfer,
+  workspace item deployment, notebook execution, Spark-over-Livy, and SQL.
 - Configuration loading and CLI routing.
 
-The shared Fabric substrate lives under `src/weaver_runtime/fabric/`
-(`auth`, `client`, `resources`, `onelake`, `livy`, `sql`,
-`settings`, `context`). New Fabric behaviour belongs there, not in `scripts/`.
+Weaver must stay **environment-neutral**. Never add defaults for product,
+workspace, Lakehouse, endpoint, repository, or notebook names, production
+endpoints, or local platform paths. Allowed defaults are generic technical values
+(Fabric API URLs, auth scopes, Livy version, timeouts, polling intervals,
+parallelism) and live in `fabric/settings.py`, resolving CLI override →
+environment variable → technical default.
 
-Weaver must stay environment-neutral. Do not add defaults for product names,
-workspace names, Lakehouse names, SQL endpoint names, repository names,
-notebook names, production endpoints, or local platform paths.
+## Repository map
 
-Allowed defaults are generic technical values, such as Fabric API URLs,
-authentication scopes, Livy API version, timeouts, polling intervals, and
-degrees of parallelism. These live in `fabric/settings.py` and resolve
-CLI override -> environment variable -> technical default.
+```
+weaver/
+├── README.md                    project landing page
+├── AGENTS.md                    this guide
+├── docs/                        user documentation (authoritative — see below)
+├── examples/simple-ses/         the canonical runnable example
+├── src/weaver_runtime/
+│   ├── cli.py                   top-level argparse entry point (weaver …)
+│   ├── fabric/                  shared Fabric substrate (auth, client, onelake, livy, sql, settings)
+│   └── dbrep/                   the database-representation build/load system
+│       ├── cli/                 generate/build/load/wipe subcommands
+│       ├── config/              environment.py, databases.py, resolution.py
+│       ├── ses/                 discovery, metadata, dependencies, graph
+│       ├── build/               planner, manifest, runtime bundle, prune
+│       ├── runtime/             orchestrator, load, folders, load_policy, logging, workflow_logging
+│       ├── sql/                 SQL backend (DDL, ETL, templates)
+│       ├── targets/             Files/Delta/SQL/Fabric target adapters
+│       ├── fabric/              DBRep OneLake transfer + Fabric Lakehouse build/load
+│       └── objects.py           Folder/Table/View authoring base classes
+├── scripts/                     legacy operational wrappers (prefer src/weaver_runtime)
+└── tests/                       core (default), spark/, fabric/
+```
 
-## Command Surface
+## Authoritative documents
 
-The supported command is installed from the platform root:
+The user documentation is the source of truth for behaviour. When you change
+behaviour, update the matching doc in the same change.
+
+| Document | Owns |
+|---|---|
+| [README.md](README.md) | what Weaver is, the philosophy, install, first run |
+| [docs/concepts.md](docs/concepts.md) | the mental model and naming stack |
+| [docs/getting-started.md](docs/getting-started.md) | the first-run walkthrough |
+| [docs/configuration.md](docs/configuration.md) | `dbrep-env.yml` / `dbrep-weaver.yml` |
+| [docs/authoring.md](docs/authoring.md) | the object header + `read()` contract |
+| [docs/build-and-load.md](docs/build-and-load.md) | the runtime lifecycle |
+| [docs/command-reference.md](docs/command-reference.md) | every public CLI command |
+| [examples/simple-ses/](examples/simple-ses) | the example referenced throughout the docs |
+
+`docs/fabric_capacity_control.md` and `docs/sql-tables-and-central-metadata-plan.md`
+are focused design notes, not part of the user-facing set above.
+
+## Command surface
+
+Install editable and run the CLI:
 
 ```bash
-cd /Users/matthiaswong/dev/dwg-platform
-.venv/bin/pip install -e ./weaver
+python3 -m venv .venv
+.venv/bin/pip install -e .            # add [spark] for local Delta builds
 .venv/bin/weaver --help
 ```
 
-Normal product use passes configuration from the product repo:
+The lifecycle is one `env.yml` (hosts only) referenced by a `weaver.yml`
+(`databases:` with per-representation `type`):
 
 ```bash
-.venv/bin/weaver fabric capacity status --resource-group <resource-group> --capacity-name <capacity>
-.venv/bin/weaver fabric capacity resume --resource-group <resource-group> --capacity-name <capacity>
-.venv/bin/weaver fabric capacity suspend --resource-group <resource-group> --capacity-name <capacity>
-.venv/bin/weaver fabric workspace push --source <workspace-source> --workspace-name <workspace>
-.venv/bin/weaver fabric notebook run --workspace-name <workspace> --name "Notebook name"
+.venv/bin/weaver generate --config weaver.yml --from T0_SES,T1_SES --to T0_FILES,T1_DELTA [--out DIR]
+.venv/bin/weaver build    --config weaver.yml --from T0_SES,T1_SES --to T0_FILES,T1_DELTA [--prune] [--dry-run]
+.venv/bin/weaver load     --config weaver.yml --target T1_DELTA
+.venv/bin/weaver wipe     --config weaver.yml --target T1_DELTA
 ```
 
-SES create/wipe now runs through the lifecycle, not a dedicated command:
+Fabric operational commands:
 
 ```bash
-.venv/bin/weaver build --config weaver.yml --from <SES> --to <SQL>
-.venv/bin/weaver wipe  --config weaver.yml --target <SQL_or_Lakehouse_target>
+.venv/bin/weaver fabric capacity status  --resource-group <rg> --capacity-name <cap>
+.venv/bin/weaver fabric workspace push    --source <dir> --workspace-name <workspace>
+.venv/bin/weaver fabric notebook run      --workspace-name <workspace> --name "<notebook>"
 ```
 
-Legacy scripts under `scripts/` may exist as compatibility wrappers, but new
-substantive behavior should live under `src/weaver_runtime`.
+In the product monorepo, Weaver is installed from the platform root
+(`pip install -e ./weaver`) and invoked with product config; keep paths and names
+in the product repo, never in Weaver.
 
-## Database representation build/load
+## Architecture invariants
 
-`src/weaver_runtime/dbrep` is the generic database-representation build/load
-system. Weaver builds between named database representations (typed
-`SES`/`Files`/`Delta`/`SQL` third-level names on hosts declared in environment
-config), installs a runtime bundle + manifest + load plan under the Lakehouse
-host, and loads target-only from the installed runtime.
+These are not in the user docs and must hold:
 
-```bash
-../.venv/bin/weaver generate --config weaver.yml --from T0_SES,T1_SES --to T0_LOCAL_FILES,T1_LOCAL_DELTA [--out DIR]
-../.venv/bin/weaver build    --config weaver.yml --from T0_SES,T1_SES --to T0_LOCAL_FILES,T1_LOCAL_DELTA [--prune] [--dry-run]
-../.venv/bin/weaver load     --config weaver.yml --target T1_LOCAL_DELTA
-../.venv/bin/weaver wipe      --config weaver.yml --target T1_LOCAL_DELTA
-```
-
-`generate` produces concrete deployment/runtime artifacts without applying them
-(SQL targets emit source objects + a `plan.json`; Lakehouse/Fabric targets stage
-the runtime bundle under `--out` and never upload). The former public
-`plan`/`discover`/`manifest` subcommands have been removed.
-
-Rules that must hold: config uses one `env.yml` (hosts only) referenced by
-`weaver.yml` (`databases:` with per-representation `type`); dependency parsing is
-static (`self.repo["..."]` / SQL `from`/`join`); two-part refs are
-intra-database, three-part are managed cross-database only when supplied, else
-external; discovery ignores every `_`-prefixed folder/file. Keep PySpark out of
-core imports — it is loaded lazily by the physical runtime, while
-`runtime/load_policy.py` is a pure, PySpark-free reference for load behaviour.
-`sqlparse`, `pyodbc`, and
-`azure-identity` are also lazy so the core (and the installed Fabric runtime)
-import them only when SQL discovery / SQL connections actually run.
-
-### Object authoring and runtime logging (`dbrep/runtime`)
-
-Both kinds implement `read()` returning one `(upserts, deletes)` pair (never
-`load()`): `Folder.read()` → `(staging_folder, file_names_to_delete)` staged in a Weaver-issued object-local `<Folder>_Staging` sibling (retained on failure and cleared on retry; object code
-never writes the destination directly); `Table.read(spark)` →
-`(staging_dataframe, primary_key_values_to_delete)`. Weaver owns all
-mutation, CRUD counting, and logging. Deletion has one authority: a table without
-a primary key cannot delete rows, and `Incremental: false` and explicit delete
-tuples cannot be combined (enforced in `runtime/load_policy.py` before any
-write). `runtime/folders.py` is the pure staging contract + reconciliation (file
-CRUD by size/content diff over only the staged files and explicit deletes, never
-a full destination rescan); `runtime/logging.py` holds the shared pair validator;
-`runtime/workflow_logging.py` mints one `{timestamp}_{uuid}` workflow
-per `load`, writes one `{timestamp}_{uuid}.json` step record per object under
-`Files/_logs/<workflow_id>` the moment it finishes (success or failure, with the
-full structured exception), and keeps object/module names inside the JSON. Every
-step carries a common `CrudCounts` (`unit: files`/`rows`); kind specifics live in
-`details`. `folders.py`,
-`load_policy.py`, and `workflow_logging.py` are pure stdlib — no PySpark. See
-`docs/authoring.md` for the authoring reference.
-
-### SQL backend (`dbrep/sql`)
-
-Real SQL builds run against a Fabric Warehouse. DDL/load are ported from the
-legacy `source` machinery (self-inferring backing table + view, ETL load
-procedure). Build executes DDL **layer by layer** using the dependency graph
-(no retry loops), parallel within a layer up to the server's
-`degrees_of_parallelism`; it records managed objects in a `_weaver.objects` table
-inside the warehouse so `--prune` drops only removed managed objects. `weaver
-load --target <SQL>` executes installed load procedures in dependency order.
-Source objects for a SQL target must be `.sql`.
-
-### Fabric Lakehouse backend (`dbrep/fabric`)
-
-Declare a `Fabric Lakehouse` server with `server: Workspace/Lakehouse` and an
-optional Fabric `environment` name.
-Build stages the bundle locally then transfers `Files/` to OneLake through the
-private DBRep movement layer (`weaver_runtime.dbrep.fabric.transfer`): `Files/_weaver/runtime` transfers with
-signature diff + scoped delete (Weaver-owned), object folders sync without
-delete. Load submits the bundled orchestrator to Fabric Spark via Livy
-(`weaver_runtime.fabric.livy`): it mounts the Lakehouse for orchestrator import +
-Folder staging/reconciliation IO and durable `Files/_logs` step logging, and
-passes the `abfss://` OneLake path as `spark_root` for all Delta reads/writes (the
-FUSE mount cannot host Spark Delta writes). The same generated runtime program
-runs locally and on Fabric — logging is not transport-specific. Fabric-facing
-object files must join paths with f-strings, not `pathlib.Path` (which mangles
-`abfss://`).
+- **Static dependency parsing.** Discovery never imports object modules.
+  `self.repo["…"]` (Python) and `from` / `join` (SQL) references are read from
+  source. Two-part refs are intra-database; three-part are managed cross-database
+  only when the database is supplied, else external; four-part are external.
+- **Discovery ignores every `_`-prefixed folder and file.**
+- **PySpark stays out of the core.** It is a lazy import confined to
+  `runtime/load.py`. `runtime/folders.py`, `runtime/load_policy.py`, and
+  `runtime/workflow_logging.py` are pure stdlib. `sqlparse`, `pyodbc`, and
+  `azure-identity` are likewise lazy so the core and the installed Fabric runtime
+  import them only when actually needed.
+- **One deletion authority.** A table without a primary key cannot delete rows;
+  `Incremental: false` and explicit delete tuples cannot be combined. Enforced in
+  `runtime/load_policy.py` before any write.
+- **Objects never mutate the target.** `read()` returns `(upserts, deletes)`;
+  Weaver owns mutation, CRUD counting, staging, and logging. Folders stage into a
+  Weaver-issued `<Folder>_Staging` sibling, retained on failure.
+- **The same generated program runs locally and on Fabric.** Logging and
+  reconciliation are not transport-specific. Fabric-facing object code joins paths
+  with f-strings, not `pathlib.Path` (which mangles `abfss://`).
+- **SQL build executes DDL layer by layer** (no retry loops), parallel within a
+  layer up to the server's `degrees_of_parallelism`, recording managed objects in
+  `_weaver.objects` so `--prune` drops only removed managed objects.
 
 ## Tests
 
-Run from this repo:
-
 ```bash
-cd /Users/matthiaswong/dev/dwg-platform/weaver
-../.venv/bin/python -m pytest
+.venv/bin/python -m pytest                 # core only (default)
+.venv/bin/python -m pytest -m spark        # optional local Spark/Delta (needs Java 17)
+WEAVER_FABRIC_WORKSPACE=<ws> .venv/bin/python -m pytest -m fabric   # opt-in Fabric integration
 ```
 
-Core tests never import PySpark (guarded by `tests/test_no_pyspark_core.py`).
-Optional local Spark/Delta tests live under `tests/spark/` and are deselected by
-default; run them with Homebrew Java 17 (see `dwg-site-kit/AGENTS.md` for the
-`JAVA_HOME` incantation):
+Default `pytest` runs core only (`addopts = -m "not spark and not fabric"`). Core
+tests never import PySpark (guarded by `tests/test_no_pyspark_core.py`), and a
+guard asserts `src/weaver_runtime` contains no product or environment defaults.
+Fabric tests create and delete a disposable Warehouse and Lakehouse in the given
+workspace and skip unless it is set.
 
-```bash
-../.venv/bin/python -m pytest -m spark
-```
+## Conventions
 
-Opt-in Fabric integration tests live under `tests/fabric/` (deselected by
-default; they need `az login`). They create a disposable Warehouse and Lakehouse
-in the given workspace via the Fabric REST API and delete them afterwards, so
-they only need the workspace and skip unless it is set:
+### Documentation
 
-```bash
-WEAVER_FABRIC_WORKSPACE=<workspace name or id> \
-../.venv/bin/python -m pytest -m fabric
-```
+- Treat the user docs as behaviour's source of truth. A behaviour change that
+  leaves a doc stale is incomplete.
+- Keep [`examples/simple-ses`](examples/simple-ses) runnable and in step with the
+  docs — it is the canonical reference the whole documentation set points to.
+  Verify it with `weaver build`/`load` (Files needs no Spark; Delta needs Java 17).
+- Prefer linking to a doc over restating it.
 
-Default `pytest` runs core only (`addopts = -m "not spark and not fabric"`).
-Tests include a guard that `src/weaver_runtime` does not contain product or
-environment defaults.
+### SQL style
 
-## SQL style
-
-- Use lower-case SQL keywords.
-- Put join predicates on the same line as the joined table when there is one predicate.
-- Start new lines only for additional `and` / `or` predicates.
-- Wrap `or` predicate groups in parentheses.
-- Align table names, aliases, and column lists where it improves scanability.
-- Use leading commas for column lists, not trailing commas.
+- Lower-case SQL keywords.
+- Put a single join predicate on the same line as the joined table; start new
+  lines only for additional `and` / `or` predicates, and wrap `or` groups in
+  parentheses.
+- Leading commas for column lists; align names, aliases, and lists where it aids
+  scanability.

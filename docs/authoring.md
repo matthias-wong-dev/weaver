@@ -1,236 +1,280 @@
-# Authoring Weaver objects
+# Authoring objects
 
-A Weaver object declares what it produces; Weaver owns how the change is applied,
-counted, and logged. Objects never mutate the target directly.
+A Weaver object declares **what it produces**; Weaver owns **how the change is
+applied, counted, and logged.** Objects never mutate the target directly.
 
-Both object kinds share one endpoint shape: `read()` returns a two-item tuple of
+This page is the authoring reference. It follows the
+[`examples/simple-ses`](../examples/simple-ses) objects, which are short enough to
+read in full.
+
+## The shape of an object
+
+Every object is a file with two parts:
+
+1. a **header** — a small YAML block (in a Python docstring or a SQL `/* … */`
+   comment) that declares the object's identity and contract;
+2. a **body** — ordinary Python or SQL that produces the result.
+
+Weaver reads the header **statically** to plan the build, and runs the body only
+at load time.
+
+Folder and Table objects share one endpoint: `read()` returns a two-item tuple of
 **proposed upserts and explicit deletes**.
 
 ```text
-Folder.read()  -> staging_folder,    file_names_to_delete
-Table.read()   -> staging_dataframe, primary_key_values_to_delete
+Folder.read()  ->  staging_folder,    file_names_to_delete
+Table.read()   ->  staging_dataframe, primary_key_values_to_delete
 
-Weaver
+Weaver then:
     validates      the pair
     reconciles     upserts and deletes against the target
     mutates        the target
-    calculates     standard CRUD
-    writes         durable workflow logs
+    counts         standard CRUD
+    writes         a durable step log
     captures       full errors
-    cleans         staging resources
-```
-
-## The two authoring shapes
-
-```python
-from weaver_runtime.dbrep.objects import Folder, Table
-
-
-class Source__Archive(Folder):
-    def read(self):
-        with self.staging_folder() as staging_folder:
-            download_and_prepare_files(staging_folder.path)
-
-        file_names_to_delete = ("unwanted.json",)
-        return staging_folder, file_names_to_delete
-
-
-class Sales__CustomerOrder(Table):
-    def read(self):
-        staging_dataframe = build_customer_orders(self.spark)
-
-        primary_key_values_to_delete = (("order-17",), ("order-29",))
-        return staging_dataframe, primary_key_values_to_delete
+    cleans         staging
 ```
 
 The normal no-delete case for either kind is `return upserts, ()`.
 
-## The object surface
+---
 
-Inside `read()` an object reads everything it needs through ergonomic `self.*`
-accessors — it never touches `self.context`. Weaver populates them from the load
-context, and reads the current table through its Fabric-aware Delta access, so the
-same code runs locally and on Fabric `abfss://` paths.
+## The header contract
 
-| Accessor | Kind | Meaning |
+The header is a small YAML mapping. These keys are understood:
+
+| Key | Applies to | Meaning |
 |---|---|---|
-| `self.repo["Schema.Object"]` | both | a resolved dependency (a Folder's path, or a dependency Table's DataFrame) |
-| `self.path` | both | the destination path, read-only — a Delta path for tables, a directory for folders. Do not write here directly. |
-| `self.spark` | both | the active Spark session (`None` for folder-only loads) |
-| `self.log_dir` | both | the current workflow's durable log directory |
-| `self.schema` | Table | the declared ordered `((column, type), …)` schema |
-| `self.primary_key` | Table | the declared primary-key column tuple (empty when none) |
-| `self.is_incremental` | Table | the declared incremental policy |
-| `self.current_dataframe` | Table | the currently persisted table as a DataFrame, or `None` if it has never been written |
-| `self.empty_frame()` | Table | an empty DataFrame in `self.schema` |
+| `Folder ID` / `Table ID` / `View ID` | one, required | the object's `Schema.Object` identity and its kind |
+| `Description` | all, required | what the object is, in a sentence |
+| `Lineage` | all, required | where its data comes from |
+| `Primary key` | Table / SQL | key column, or comma-separated columns for a composite key |
+| `Incremental` | Folder / Table | load policy (see [Load policy](#load-policy-incremental)) |
+| `File key` | Folder, required | glob(s) identifying the files this folder manages |
+| `Schema` | Table | ordered `column: type` mapping; required for Delta tables |
 
-`self.current_dataframe` is how a Table introspects its own prior state for
-incremental work — carrying metadata timestamps forward for unchanged rows, or
-reading a watermark column to skip already-loaded inputs. It is `None` on the
-first load, so guard for it:
+Rules worth knowing up front:
+
+- Exactly **one** of `Folder ID` / `Table ID` / `View ID` must be present — it
+  both names the object and picks its kind.
+- The ID is two-part `Schema.Object`. The **database** comes from configuration,
+  not the header.
+- `Description` and `Lineage` must be real text — placeholders like `TBD` or
+  `n/a` are rejected.
+- You may add your own keys (`Notes`, `Revisions`, `Column notes`, …). Weaver
+  keeps them but does not interpret them.
+
+### Filenames follow the ID
+
+The filename must match the declared ID, so the file you see is the object it
+declares:
+
+| Kind | ID | Filename |
+|---|---|---|
+| Python | `Sales.Customer` | `Sales__Customer.py` (`.` → `__`) |
+| SQL | `Sales.CustomerOrderSummary` | `Sales.CustomerOrderSummary.sql` |
+
+A Python file must define exactly one Weaver object class, named for the stem
+(`class Sales__Customer(Table)`).
+
+---
+
+## Folder objects
+
+A **Folder** produces a managed set of files. `read()` returns:
+
+1. a **`StagingFolder`** whose files are created or updated in the target;
+2. a sequence of **relative file names to delete**.
+
+Here is `Sales.CustomerCsv` from the example — it lands the current customer
+extract:
 
 ```python
-class Sales__CustomerOrder(Table):
+"""
+Folder ID: Sales.CustomerCsv
+Description: Raw customer master snapshot as landed CSV, one file per extract.
+Lineage: Writes the current customer extract into the landing folder as customers.csv.
+File key: "**/*.csv"
+Incremental: false
+"""
+
+from pathlib import Path
+
+from ._helpers.sample_source import CUSTOMER_SNAPSHOT
+from weaver_runtime.dbrep.objects import Folder
+
+
+class Sales__CustomerCsv(Folder):
     def read(self):
-        incoming = build_customer_orders(self.spark)
-        existing = self.current_dataframe
-        if existing is None:
-            return incoming, ()
-        return preserve_first_seen(incoming, existing, self.primary_key), ()
+        with self.staging_folder() as staging:
+            for file_name, text in CUSTOMER_SNAPSHOT.items():
+                (Path(staging.path) / file_name).write_text(text, encoding="utf-8")
+
+        return staging, ()
 ```
 
-## Helpers
-
-The mechanical work an object delegates — `download_and_prepare_files` and
-`build_customer_orders` above — lives in a subfolder **inside the object's own
-database folder**, imported **relative to that folder**:
-
-```text
-SES/
-  Sales/                      <- a database folder (a build source)
-    Sales__CustomerOrder.py
-    _helpers/                 <- any name works; see the naming note
-      __init__.py
-      orders.py               <- build_customer_orders lives here
-```
-
-```python
-from ._helpers.orders import build_customer_orders   # in the object
-from .orders import parse_row                         # helper -> sibling helper
-```
-
-Weaver imports every object with its own database folder as the package root, so
-`from .<subfolder>…` is ordinary Python resolved against that folder. Each database
-is its own package, so two databases may ship like-named helper modules with
-different content and never collide. There is no shared, repo-wide helper package.
-
-**Naming is your choice** — the subfolder can be `_helpers`, `helpers`, `lib`,
-`vendor`, anything. Discovery scans a database folder's *immediate files* for objects
-and never descends into subfolders, so a helper *subfolder* is invisible to it whatever
-its name. The one rule: a loose helper *file* placed **directly** beside your object
-files (e.g. `Sales/orders.py`) would be treated as an object — so either keep helpers
-in a subfolder (any name) or prefix such a file with `_` (e.g. `_orders.py`). The `_`
-prefix is a convention that also signals "not an object" to a reader.
-
-## Workflow logging
-
-Each `weaver load` invocation is one **workflow**. Weaver mints a
-`{timestamp}_{uuid}` workflow id, creates `Files/_logs/<workflow_id>/`, and
-writes one `{timestamp}_{uuid}.json` step record per executed object — the moment
-the step finishes, success or failure. Object and module names live inside the
-JSON, never in the filename. A failed step records the full structured exception
-(type, repr, message, args, traceback, cause/context, and Spark error class / SQL
-state / Java exception text where available) and is written before the error
-leaves the runtime, so earlier successful steps are always preserved.
-
-Every step carries a standard CRUD block:
-
-```text
-Folder -> unit: files    read / created / updated / deleted
-Table  -> unit: rows     read / created / updated / deleted
-```
-
-## The Folder pair
-
-1. a **`StagingFolder`** whose leaf files are created or updated in the target;
-2. a sequence of **relative file names to delete**;
-
-Inside `staging_folder.path` use ordinary Python — `pathlib`, `shutil`,
+Inside `staging_folder().path` you use ordinary Python — `pathlib`, `shutil`,
 `requests`, `zipfile`, `pandas`, plain file writes. There are no special Weaver
 file-write methods. The pair may be returned **inside or after** the `with`
-block; both behave identically:
+block; both behave identically.
 
-```python
-with self.staging_folder() as staging_folder:
-    ...
-return staging_folder, ()
-```
+### File keys
 
-The staging directory is a physical sibling of the target named
-`<FolderName>_Staging`. For example, while `Agor.OrganisationCsv` is running:
-
-```text
-Files/T0_DWG/Agor/
-├── OrganisationCsv/
-└── OrganisationCsv_Staging/
-```
-
-A new attempt clears and recreates this directory before `read()` runs. Weaver
-removes it only after validation and reconciliation both succeed. If authoring,
-validation, reconciliation, or final cleanup fails, staging is retained beside
-the target for diagnosis; the next deliberate retry clears it before rebuilding.
-Only one staging folder may be requested during an object step.
-
-Every Folder metadata block must explicitly declare its managed file population.
-Folders default to `Incremental: true`; declare `false` when each result is the
-complete managed population:
+Every Folder header declares a **`File key`** — one glob or a list of globs — that
+identifies the files the folder manages:
 
 ```yaml
 File key:
   - "**/*.pdf"
   - "**/*.json"
-Incremental: true
 ```
 
-A single glob string is also valid. File keys match relative POSIX paths, and
-each matching path is one managed file identity. Weaver fails the load before
-target mutation if any staged leaf file does not match at least one File key.
+File keys match relative POSIX paths, and each matching path is one managed file
+identity. Weaver **fails the load before touching the target** if any staged file
+does not match a File key — so temporary download pages or scratch artefacts must
+stay *outside* staging unless they are meant to persist.
 
-Weaver reconciles managed staged files against the target and counts file CRUD
-(`created`/`updated`/`read`-only by size then content; `deleted` for files that
-existed). With `Incremental: true`, missing managed target files are retained
-and explicit deletes are allowed only when they match a File key. With
-`Incremental: false`, staging is the complete managed population: Weaver deletes
-matching target files absent from staging and rejects explicit deletes.
-Non-matching target files are never counted, changed, or deleted.
+### Load policy (folders)
 
-### Folder rules
+Folders default to `Incremental: true`. The policy decides what happens to target
+files that are **not** in this run's staging:
 
-- **Staged files must match a File key.** Temporary download pages or intermediate
-  artefacts should stay **outside** staging unless meant to persist — otherwise
-  validation fails. Nested matching files count individually; directories are
-  never CRUD units.
-- **Deletion has one mode.** With `Incremental: true`, delete entries are exact
-  relative file names — never absolute, `..`-traversing, a glob, or a directory.
-  With `Incremental: false`, explicit deletes must be empty. A path cannot be both
-  staged and explicitly deleted.
-- **Reserved Weaver files** such as `_weaver.json` cannot be staged, replaced, or
-  deleted.
-- **Direct writes to the target are unsupported.** Do not write to
-  `self.path`; stage instead.
+- **`Incremental: true`** — files already in the target are **retained**. Staging
+  need only carry what is new or changed. This is the pattern for accumulating
+  extracts, like `Sales.OrderCsv`:
 
-The `with` block does not own physical cleanup. If object code raises inside it,
-files already written remain in the object-local staging folder. Authors must
-continue writing only to staging, never directly to `self.path`.
+  ```python
+  class Sales__OrderCsv(Folder):
+      def read(self):
+          destination = Path(str(self.path))
+          already_landed = {path.name for path in destination.glob("*.csv")}
 
-## The Table pair
+          with self.staging_folder() as staging:
+              for file_name, text in ORDER_SNAPSHOTS.items():
+                  if file_name not in already_landed:
+                      (Path(staging.path) / file_name).write_text(text, encoding="utf-8")
+
+          return staging, ()
+  ```
+
+- **`Incremental: false`** — staging is the **complete** managed population.
+  Weaver deletes managed target files that are absent from staging. This is the
+  pattern for a full snapshot, like `Sales.CustomerCsv`.
+
+Reading the destination (`self.path`) for a watermark, as above, is fine.
+**Writing** to `self.path` is not — stage instead.
+
+### Deleting files
+
+With `Incremental: true` you may also return explicit file names to delete. They
+must be exact relative names that match a File key — never absolute, never a
+glob, never `..`-traversing, never a directory:
+
+```python
+return staging, ("obsolete/report-2019.pdf",)
+```
+
+With `Incremental: false`, explicit deletes must be empty (the snapshot already
+implies them). Reserved Weaver files such as `_weaver.json` can never be staged,
+replaced, or deleted.
+
+---
+
+## Table objects
+
+A **Table** produces rows. `read()` returns:
 
 1. a **Spark DataFrame** of rows to insert or update;
 2. a sequence of **primary-key tuples** identifying rows to delete, in declared
-   primary-key column order;
+   primary-key column order.
 
-A table without a primary key is a full replacement: its accepted incoming rows
-become the complete table, and an empty incoming DataFrame empties it. Append-like
-audit/event tables therefore need a primary key that uniquely identifies each
-event and `Incremental: true`. These rules are shared by Spark/Delta and SQL
-tables.
-
-Tables default to `Incremental: false`, meaning the returned table is the complete
-current population. `Incremental: true` requires a primary key.
+Here is `Sales.Customer` from the example:
 
 ```python
-# single-column primary key
-primary_key_values_to_delete = (("order-17",), ("order-29",))
+"""
+Table ID: Sales.Customer
+Description: One row per customer, typed from the landed customer snapshot.
+Lineage: Reads the customer CSV landed in Raw.Sales.CustomerCsv; the current file is the whole table.
+Primary key: customer_id
+Schema:
+  customer_id: string
+  customer_name: string
+  segment: string
+  signup_date: date
+  loaded_at: timestamp
+"""
 
-# composite primary key (declared order)
-primary_key_values_to_delete = (("agency-a", "2026-07"), ("agency-b", "2026-06"))
+from ._helpers.csv_frames import read_typed_csv
+from weaver_runtime.dbrep.objects import Table
+
+
+class Sales__Customer(Table):
+    def read(self):
+        from pyspark.sql import functions as F
+
+        source = self.repo["Raw.Sales.CustomerCsv"]
+        typed = read_typed_csv(self.spark, source, self.schema)
+        return typed.withColumn("loaded_at", F.current_timestamp()), ()
 ```
 
-### One deletion authority
+A Delta table **must** declare a `Schema` — Weaver creates the empty table from it
+at build time, before any data exists.
 
-> No primary key means no row deletion.
+### Load policy (incremental)
 
-| Primary key | Incremental | Explicit delete tuples | Result |
+The `Incremental` flag decides what happens to rows **not** returned by this run:
+
+| `Incremental` | Primary key | Behaviour |
+|---|---|---|
+| `false` (default) | present | **Full snapshot** — returned rows become the whole table; missing keys are reconciled out. |
+| `false` | absent | **Full replacement** — returned rows become the whole table. |
+| `true` | required | **Incremental** — missing keys are retained; returned rows are upserted. |
+
+`Sales.Customer` above is a full snapshot. `Sales.Order` is incremental — one line
+in the header, and past orders survive across runs:
+
+```python
+"""
+Table ID: Sales.Order
+...
+Primary key: order_id
+Incremental: true
+Schema:
+  order_id: string
+  ...
+"""
+```
+
+`Incremental: true` **requires** a primary key — without one there is no way to
+know which existing rows to keep.
+
+### Introspecting the current table
+
+A Table can read its own current state through `self.current_dataframe` — the
+persisted table as a DataFrame, or `None` before its first load. This is how an
+object does genuinely incremental work: skipping already-loaded inputs, or
+carrying metadata timestamps forward for unchanged rows.
+
+```python
+class Sales__Order(Table):
+    def read(self):
+        incoming = read_new_orders(self.spark, self.repo["Raw.Sales.OrderCsv"])
+        existing = self.current_dataframe
+        if existing is None:                       # first load
+            return incoming, ()
+        already = {row["order_id"] for row in existing.select("order_id").collect()}
+        return incoming.where(~F.col("order_id").isin(already)), ()
+```
+
+Always guard for the `None` first-load case.
+
+### Deleting rows
+
+There is one deletion authority, and it is strict:
+
+> **No primary key means no row deletion.**
+
+| Primary key | Incremental | Explicit deletes | Result |
 |---|---|---|---|
 | absent  | false | empty     | allowed (full replacement) |
 | absent  | false | populated | **error** |
@@ -240,19 +284,179 @@ primary_key_values_to_delete = (("agency-a", "2026-07"), ("agency-b", "2026-06")
 | present | true  | empty     | retain missing keys |
 | present | true  | populated | apply explicit deletes |
 
-`Incremental` controls how Weaver applies the result returned by `read()`. When
-true, existing managed files or primary-key rows absent from this run are retained.
-It does not determine how the object selects source files or rows. Explicit delete
-tuples are available only in incremental mode and must match the primary-key arity,
-contain no null values, and are deduplicated; a key that is both staged and
-explicitly deleted is upserted (the delete is counted unmatched). Row CRUD counts
-`deleted` for rows actually removed; details add `accepted`, `rejected`,
-`reconciliation_ran`, and `explicit_delete_keys_read`/`matched`/`unmatched`.
+Explicit delete tuples are available only in incremental mode, must match the
+primary-key arity, and contain no nulls:
 
-For keyed tables, Weaver cleanses staging before comparing it with the target.
-Rows with blank primary keys are rejected. For each duplicated non-blank key, one
-unspecified representative is accepted and only the surplus rows are rejected.
-SQL staging is then cleansed in place, while Delta uses the equivalent accepted
-population. That population drives inserts, updates, and complete missing-key
-reconciliation; rejects do not prevent valid rows from loading or suppress
-reconciliation.
+```python
+# single-column primary key
+primary_key_values_to_delete = (("order-17",), ("order-29",))
+
+# composite primary key, in declared column order
+primary_key_values_to_delete = (("agency-a", "2026-07"), ("agency-b", "2026-06"))
+```
+
+An append-only audit or event table is just an incremental table whose primary
+key uniquely identifies each event.
+
+---
+
+## SQL objects
+
+A **SQL object** is a `.sql` file: a `/* … */` header followed by a `select`.
+Weaver builds it into a Warehouse as a self-inferring backing table, a view, and
+a load procedure. You write only the query.
+
+`Sales.CustomerOrderSummary` from the example joins the two Core tables:
+
+```sql
+/*
+View ID: Sales.CustomerOrderSummary
+
+Description: |
+    One row per customer with their order count and total order amount.
+
+Lineage: Reads Core.Sales.Customer and Core.Sales.Order.
+*/
+
+with order_rollup as (
+    select
+            o.customer_id
+        ,   count(*)        as order_count
+        ,   sum(o.amount)   as total_amount
+    from Core.Sales.Order as o
+    group by
+            o.customer_id
+)
+select
+        c.customer_id
+    ,   c.customer_name
+    ,   coalesce(r.order_count, 0)      as order_count
+    ,   coalesce(r.total_amount, 0.00)  as total_amount
+from      Core.Sales.Customer as c
+left join order_rollup as r on r.customer_id = c.customer_id
+```
+
+- **Dependencies are the query's relations.** Weaver reads `from` / `join`
+  relations statically: `Core.Sales.Order` and `Core.Sales.Customer` become build
+  dependencies. CTEs and aliases (`order_rollup`, `o`, `c`) are not relations and
+  are ignored.
+- **Two- vs three-part** relations follow the same rule as everywhere: `from
+  Sales.Order` is the same database; `from Core.Sales.Order` names the `Core`
+  database explicitly.
+- Use `View ID` for a view, `Table ID` for a materialised table (which also
+  declares a `Primary key`). `Incremental` is not valid on a `View`.
+
+Follow the repository SQL style: lower-case keywords, leading commas, one join
+predicate on the line with its table. See [AGENTS.md](../AGENTS.md).
+
+---
+
+## Helpers
+
+Objects stay short by delegating the mechanical work to **helper modules**. A
+helper lives in a subfolder **inside the object's own database folder** and is
+imported relative to it:
+
+```text
+SES/
+  Core/                       ← a database (a build source)
+    Sales__Customer.py
+    Sales__Order.py
+    _helpers/                 ← any name works; see the note below
+      __init__.py
+      csv_frames.py           ← read_typed_csv lives here
+```
+
+```python
+from ._helpers.csv_frames import read_typed_csv   # in the object
+from .csv_frames import _ddl                       # helper → sibling helper
+```
+
+Weaver imports every object with **its own database folder as the package root**,
+so `from .<subfolder>…` is ordinary Python resolved against that folder. Each
+database is its own package, so two databases may ship like-named helpers with
+different content and never collide. There is no shared, repo-wide helper package.
+
+**Naming is your choice** — `_helpers`, `helpers`, `lib`, `vendor`, anything.
+Discovery scans a database folder's *immediate files* for objects and never
+descends into subfolders, so a helper *subfolder* is invisible to it whatever its
+name. The one rule: a loose helper *file* placed **directly** beside your objects
+(e.g. `Core/csv_frames.py`) would be treated as an object — so either keep helpers
+in a subfolder (any name) or prefix such a file with `_` (e.g. `_csv_frames.py`).
+The `_` prefix also signals "not an object" to a reader.
+
+---
+
+## The object surface
+
+Inside `read()`, an object reads everything it needs through ergonomic `self.*`
+accessors — it never touches `self.context`. The same code runs locally and on
+Fabric `abfss://` paths.
+
+| Accessor | Kind | Meaning |
+|---|---|---|
+| `self.repo["Schema.Object"]` | both | a resolved dependency: a Folder's **path**, or a dependency Table's **DataFrame** |
+| `self.path` | both | the destination path, **read-only** — a Delta path for tables, a directory for folders. Do not write here. |
+| `self.spark` | both | the active Spark session (`None` for folder-only loads) |
+| `self.log_dir` | both | the current workflow's durable log directory |
+| `self.staging_folder()` | Folder | a fresh, empty, object-local staging folder |
+| `self.schema` | Table | the declared ordered `((column, type), …)` schema |
+| `self.primary_key` | Table | the declared primary-key column tuple (empty when none) |
+| `self.is_incremental` | Table | the declared incremental policy |
+| `self.current_dataframe` | Table | the persisted table as a DataFrame, or `None` if never written |
+| `self.empty_frame()` | Table | an empty DataFrame in `self.schema` |
+
+A dependency's representation depends on its kind: `self.repo["Raw.Sales.CustomerCsv"]`
+(a Folder) resolves to the folder's **path**, while `self.repo["Core.Sales.Customer"]`
+(a Table) would resolve to its **DataFrame**.
+
+---
+
+## Staging in detail
+
+For a Folder, the staging directory is a physical sibling of the target named
+`<FolderName>_Staging`. While `Sales.OrderCsv` runs:
+
+```text
+Files/Raw/Sales/
+├── OrderCsv/
+└── OrderCsv_Staging/
+```
+
+A new attempt clears and recreates this directory before `read()` runs. Weaver
+removes it only after validation **and** reconciliation both succeed. If
+authoring, validation, reconciliation, or cleanup fails, staging is **retained
+beside the target for diagnosis**; the next deliberate retry clears it before
+rebuilding. Only one staging folder may be requested per object step.
+
+This is why direct writes to `self.path` are unsupported: staging is what makes a
+partial failure safe. Object code that raises mid-write leaves a retained staging
+folder and an untouched target.
+
+---
+
+## Workflow logging
+
+You write no logging code. Each `weaver load` is one **workflow**: Weaver mints a
+`{timestamp}_{uuid}` id, creates `Files/_logs/<workflow_id>/`, and writes one
+`{timestamp}_{uuid}.json` step record per object **the moment it finishes** —
+success or failure. Object and module names live inside the JSON, never in the
+filename.
+
+Every step carries a standard CRUD block (`unit: files` or `unit: rows`;
+`read` / `created` / `updated` / `deleted`), with kind-specific detail under
+`details`. A failed step records the full structured exception — type, message,
+traceback, and Spark/SQL error detail where available — and is written before the
+error propagates, so earlier successful steps are always preserved.
+
+Because Weaver applied the change, Weaver is the authority on what changed. That
+is the whole point of returning a pair from `read()` instead of writing to the
+target yourself.
+
+---
+
+## See also
+
+- [Concepts](concepts.md) — objects, databases, and dependencies.
+- [Build and load](build-and-load.md) — what happens to an object after `read()`.
+- [`examples/simple-ses`](../examples/simple-ses) — every object above, runnable.
