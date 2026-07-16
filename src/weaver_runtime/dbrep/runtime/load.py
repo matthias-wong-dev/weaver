@@ -140,6 +140,7 @@ def execute_load_plan(
                     spark,
                     workflow_id,
                     log_dir,
+                    include_static,
                 )
             )
     finally:
@@ -169,6 +170,7 @@ def _run_step(
     spark,
     workflow_id,
     log_dir,
+    include_static: bool = False,
 ) -> StepLog:
     object_id = step["object"]
     kind = step["kind"]
@@ -186,6 +188,24 @@ def _run_step(
 
     try:
         materialisation = catalogue_by_id[object_id]["materialisation"]
+
+        # Static objects load once: skip when the target is already non-empty,
+        # so their first (empty) load runs but later loads are no-ops. A reload
+        # can be forced with --include-static.
+        if (
+            step.get("static")
+            and not include_static
+            and _static_target_non_empty(
+                kind, materialisation, lakehouse_root, spark_root, spark,
+                source_object.metadata.file_keys,
+            )
+        ):
+            log.status = "skipped"
+            log.details = {"message": "static object skipped: target already non-empty"}
+            _finish(log, started)
+            write_step_log(log_dir, log)
+            return log
+
         repo = _make_repo(
             catalogue_by_id, source_object.database, object_id, spark_root, spark, lakehouse_root
         )
@@ -224,6 +244,35 @@ def _finish(log: StepLog, started) -> None:
     completed = utc_now()
     log.completed_at = utc_timestamp(completed)
     log.duration_ms = duration_ms(started, completed)
+
+
+def _static_target_non_empty(
+    kind, materialisation, lakehouse_root, spark_root, spark, file_keys=None
+) -> bool:
+    """Return whether a static object's target already holds data.
+
+    For a Folder, only files matching the object's ``file_keys`` count, so weaver
+    bookkeeping (``_weaver.json``) in a freshly-built-but-unloaded folder does not
+    read as non-empty.
+    """
+
+    if kind == "Folder":
+        destination = Path(lakehouse_root) / materialisation
+        if not destination.exists():
+            return False
+        for key in file_keys or ("**/*",):
+            if any(path.is_file() for path in destination.glob(key)):
+                return True
+        return False
+    if kind == "Table":
+        if spark is None:
+            return False
+        table_path = _join_root(spark_root, materialisation)
+        try:
+            return spark.read.format("delta").load(str(table_path)).limit(1).count() > 0
+        except Exception:
+            return False
+    return False
 
 
 def _execute_folder_step(

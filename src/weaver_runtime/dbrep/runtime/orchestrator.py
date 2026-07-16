@@ -127,12 +127,10 @@ def select_objects_for_target(
     if object_filter is not None:
         selected = selected & set(object_filter)
 
-    if not include_static:
-        selected = {
-            object_id
-            for object_id in selected
-            if not catalogue_by_id[object_id].get("static", False)
-        }
+    # Static objects stay in the plan; whether they actually run is decided per
+    # object at execution time (skip when the target is already non-empty, unless
+    # ``--include-static`` forces a reload). ``include_static`` is threaded to the
+    # executor rather than filtering here.
 
     graph = load_dependency.get("objects", {})
     edges = [
@@ -151,6 +149,7 @@ def select_objects_for_target(
             "object": object_id,
             "kind": catalogue_by_id[object_id]["kind"],
             "action": _action_for(catalogue_by_id[object_id]["kind"]),
+            "static": catalogue_by_id[object_id].get("static", False),
         }
         for object_id in ordered_ids
     ]
